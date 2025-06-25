@@ -252,17 +252,25 @@ jobs:
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
-        $artifactName = "${{ steps.check_builds.outputs.base_artifact_name }}"
-        $packageName = "${artifactName}-BleedingEdge"
-        $packagePath = "${{ github.workspace }}\${packageName}.zip"
+        # Instead of creating one big ZIP, we'll upload individual files
+        # Get list of all files in the artifact directory for individual upload
+        $artifactDir = "${{ github.workspace }}\x64\Release\a"
+        $files = Get-ChildItem -Path $artifactDir -File
         
-        # Create ZIP package with all consolidated artifacts
-        Compress-Archive -Path "${{ github.workspace }}\x64\Release\a\*" -DestinationPath $packagePath -Force
+        $fileList = @()
+        foreach ($file in $files) {
+            $fileList += @{
+                "path" = $file.FullName
+                "name" = $file.Name
+            }
+            Write-Output "Will upload: $($file.Name) ($($file.Length) bytes)"
+        }
         
-        Write-Output "Created package: $packageName.zip"
-        echo "package_name=$packageName" >> $env:GITHUB_OUTPUT
-        echo "package_path=$packagePath" >> $env:GITHUB_OUTPUT
-      id: create_package
+        # Convert to JSON for passing to upload steps
+        $filesJson = $fileList | ConvertTo-Json -Compress
+        echo "files_to_upload=$filesJson" >> $env:GITHUB_OUTPUT
+        echo "files_count=$($fileList.Count)" >> $env:GITHUB_OUTPUT
+      id: prepare_assets
 
     - name: Get component versions
       if: steps.check_builds.outputs.has_new_build == 'true'
@@ -325,19 +333,54 @@ jobs:
           - Trigger: `${{ github.event_name }}`
           - Workflow Run: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
         draft: false
-        prerelease: true
+        prerelease: false
       id: create_release
 
-    - name: Upload Release Asset
+    - name: Upload Release Assets
       if: steps.check_builds.outputs.has_new_build == 'true'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ${{ steps.create_package.outputs.package_path }}
-        asset_name: ${{ steps.create_package.outputs.package_name }}.zip
-        asset_content_type: application/zip
+      shell: powershell
+      run: |
+        # Parse the files list and upload each one individually
+        $files = '${{ steps.prepare_assets.outputs.files_to_upload }}' | ConvertFrom-Json
+        $uploadUrl = "${{ steps.create_release.outputs.upload_url }}"
+        
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        foreach ($file in $files) {
+            $filePath = $file.path
+            $fileName = $file.name
+            
+            Write-Output "Uploading: $fileName"
+            
+            # Determine content type based on file extension
+            $contentType = switch -Regex ($fileName) {
+                '\.dll$' { 'application/octet-stream' }
+                '\.7z$' { 'application/x-7z-compressed' }
+                '\.ini$' { 'text/plain' }
+                default { 'application/octet-stream' }
+            }
+            
+            # Upload URL format: {upload_url}?name={name}&label={label}
+            $cleanUploadUrl = $uploadUrl -replace '\{.*\}', ''
+            $fullUploadUrl = "${cleanUploadUrl}?name=${fileName}"
+            
+            try {
+                # Read file content
+                $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+                
+                # Upload the file
+                $response = Invoke-RestMethod -Uri $fullUploadUrl -Method POST -Headers $headers -Body $fileBytes -ContentType $contentType
+                Write-Output "✅ Successfully uploaded: $fileName"
+            } catch {
+                Write-Error "❌ Failed to upload $fileName : $($_.Exception.Message)"
+                exit 1
+            }
+        }
+        
+        Write-Output "🎉 All files uploaded successfully!"
 
     - name: Update repository description
       if: steps.check_builds.outputs.has_new_build == 'true'
