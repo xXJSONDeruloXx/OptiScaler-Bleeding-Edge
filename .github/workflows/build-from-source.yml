@@ -27,23 +27,55 @@ jobs:
         repository: optiscaler/OptiScaler
         ref: master
         path: optiscaler-source
+        submodules: 'true'  # Important: check out submodules like upstream
         
-    - name: Get OptiScaler commit info
-      id: optiscaler_info
+    - name: Extract version from resource.h
+      id: extract_version
       shell: powershell
       run: |
         cd optiscaler-source
+        
+        # Read resource.h to extract version information
+        $resourceFile = "OptiScaler\resource.h"
+        if (-not (Test-Path $resourceFile)) {
+            Write-Error "resource.h not found at $resourceFile"
+            exit 1
+        }
+        
+        $content = Get-Content $resourceFile
+        
+        # Extract version components (following upstream pattern)
+        $majorMatch = $content | Select-String '#define\s+VER_FILE_VERSION_MAJOR\s+(\d+)'
+        $minorMatch = $content | Select-String '#define\s+VER_FILE_VERSION_MINOR\s+(\d+)'
+        $patchMatch = $content | Select-String '#define\s+VER_FILE_VERSION_PATCH\s+(\d+)'
+        $buildMatch = $content | Select-String '#define\s+VER_FILE_VERSION_BUILD\s+(\d+)'
+        
+        if (-not $majorMatch -or -not $minorMatch -or -not $patchMatch -or -not $buildMatch) {
+            Write-Error "Could not extract all version components from resource.h"
+            exit 1
+        }
+        
+        $major = $majorMatch.Matches[0].Groups[1].Value
+        $minor = $minorMatch.Matches[0].Groups[1].Value
+        $patch = $patchMatch.Matches[0].Groups[1].Value
+        $build = $buildMatch.Matches[0].Groups[1].Value
+        
+        $version = "$major.$minor.$patch.$build"
+        
+        # Get commit info
         $commitSha = git rev-parse HEAD
         $shortSha = git rev-parse --short HEAD
-        $commitDate = Get-Date -Format "yyyyMMdd"
+        $commitDate = Get-Date -Format "yyyyMMdd-HHmm"
         
+        Write-Output "Extracted version: $version"
         Write-Output "OptiScaler HEAD SHA: $commitSha"
         Write-Output "Short SHA: $shortSha"
         Write-Output "Commit Date: $commitDate"
         
-        # Create a unique release name
-        $releaseName = "OptiScaler-Source-$commitDate-$shortSha"
+        # Create version-based release name (following upstream pattern)
+        $releaseName = "source-v$version-$commitDate-$shortSha"
         
+        echo "version=$version" >> $env:GITHUB_OUTPUT
         echo "commit_sha=$commitSha" >> $env:GITHUB_OUTPUT
         echo "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
         echo "commit_date=$commitDate" >> $env:GITHUB_OUTPUT
@@ -52,23 +84,14 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v2
-
-    - name: Restore OptiScaler dependencies
+    - name: Build OptiScaler (following upstream approach)
       shell: powershell
       run: |
         cd optiscaler-source
-        Write-Output "Restoring NuGet packages..."
-        nuget restore OptiScaler.sln
-
-    - name: Build OptiScaler
-      shell: powershell
-      run: |
-        cd optiscaler-source
-        Write-Output "Building OptiScaler..."
+        Write-Output "Building OptiScaler following upstream approach..."
         
-        # Build the solution
+        # Use the same build approach as upstream just_build.yml
+        # Build Release x64 configuration
         msbuild OptiScaler.sln /p:Configuration=Release /p:Platform=x64 /m
         
         if ($LASTEXITCODE -ne 0) {
@@ -77,12 +100,61 @@ jobs:
         }
         
         Write-Output "Build completed successfully!"
+        
+        # Verify the main output exists
+        $mainDll = "x64\Release\OptiScaler.dll"
+        if (-not (Test-Path $mainDll)) {
+            Write-Error "Main output OptiScaler.dll not found at $mainDll"
+            exit 1
+        }
+        
+    - name: Verify build outputs and organize artifacts
+      shell: powershell
+      run: |
+        cd optiscaler-source
+        $version = "${{ steps.extract_version.outputs.version }}"
+        
+        Write-Output "=== Build Output Verification ==="
+        
+        # Check for expected outputs
+        $expectedFiles = @(
+            "x64\Release\OptiScaler.dll"
+        )
+        
+        $missingFiles = @()
+        foreach ($file in $expectedFiles) {
+            if (Test-Path $file) {
+                $fileInfo = Get-Item $file
+                Write-Output "✅ Found: $file ($($fileInfo.Length) bytes)"
+            } else {
+                $missingFiles += $file
+                Write-Output "❌ Missing: $file"
+            }
+        }
+        
+        if ($missingFiles.Count -gt 0) {
+            Write-Error "Missing required build outputs: $($missingFiles -join ', ')"
+            exit 1
+        }
+        
+        # List all files in the release directory for transparency
+        Write-Output "=== All files in Release directory ==="
+        Get-ChildItem -Path "x64\Release" -Recurse | ForEach-Object {
+            if ($_.PSIsContainer) {
+                Write-Output "📁 $($_.FullName.Replace($PWD, '.'))"
+            } else {
+                Write-Output "📄 $($_.FullName.Replace($PWD, '.')) ($($_.Length) bytes)"
+            }
+        }
+        
+        Write-Output "=== Build verification completed successfully ==="
 
     - name: Package OptiScaler build artifacts
       shell: powershell
       run: |
-        $commitDate = "${{ steps.optiscaler_info.outputs.commit_date }}"
-        $shortSha = "${{ steps.optiscaler_info.outputs.short_sha }}"
+        $commitDate = "${{ steps.extract_version.outputs.commit_date }}"
+        $shortSha = "${{ steps.extract_version.outputs.short_sha }}"
+        $version = "${{ steps.extract_version.outputs.version }}"
         
         # Create artifact directory
         $artifactDir = "${{ github.workspace }}\x64\Release\a"
@@ -106,21 +178,26 @@ jobs:
             Write-Output "Copied $($file.Name)"
         }
         
-        # Create a comprehensive archive of the build
-        $archiveName = "OptiScaler-Source-$commitDate-$shortSha.7z"
+        # Create a comprehensive 7z archive following upstream pattern
+        $archiveName = "OptiScaler-v$version-source-$commitDate-$shortSha.7z"
         $archivePath = "$artifactDir\$archiveName"
         
-        # Use 7z to create archive if available, otherwise use PowerShell compression
-        try {
-            $7zPath = Get-Command "7z.exe" -ErrorAction Stop
-            & $7zPath a -t7z "$archivePath" "$sourceDir\*"
+        # Install 7-Zip first (following upstream approach)
+        Write-Output "Installing 7-Zip..."
+        Invoke-WebRequest -Uri "https://www.7-zip.org/a/7z2301-x64.exe" -OutFile "7z-installer.exe"
+        Start-Process -FilePath "7z-installer.exe" -ArgumentList "/S" -Wait
+        
+        # Add 7-Zip to PATH
+        $env:PATH += ";C:\Program Files\7-Zip"
+        
+        # Create 7z archive
+        & "C:\Program Files\7-Zip\7z.exe" a -t7z "$archivePath" "$sourceDir\*"
+        
+        if ($LASTEXITCODE -eq 0) {
             Write-Output "Created 7z archive: $archiveName"
-        } catch {
-            # Fallback to ZIP if 7z not available
-            $zipName = "OptiScaler-Source-$commitDate-$shortSha.zip"
-            $zipPath = "$artifactDir\$zipName"
-            Compress-Archive -Path "$sourceDir\*" -DestinationPath $zipPath -Force
-            Write-Output "Created ZIP archive: $zipName (7z not available)"
+        } else {
+            Write-Error "Failed to create 7z archive"
+            exit 1
         }
 
     - name: Download latest dlssg-to-fsr3 release
@@ -224,9 +301,13 @@ jobs:
             Write-Output "  $($_.Name) ($($_.Length) bytes)"
         }
 
-    - name: Prepare release assets
+    - name: Prepare release assets and create archive
       shell: powershell
       run: |
+        $version = "${{ steps.extract_version.outputs.version }}"
+        $commitDate = "${{ steps.extract_version.outputs.commit_date }}"
+        $shortSha = "${{ steps.extract_version.outputs.short_sha }}"
+        
         # Get list of all files in the artifact directory for individual upload
         $artifactDir = "${{ github.workspace }}\x64\Release\a"
         $files = Get-ChildItem -Path $artifactDir -File
@@ -244,6 +325,11 @@ jobs:
         $filesJson = $fileList | ConvertTo-Json -Compress
         echo "files_to_upload=$filesJson" >> $env:GITHUB_OUTPUT
         echo "files_count=$($fileList.Count)" >> $env:GITHUB_OUTPUT
+        
+        # Create a comprehensive archive name following upstream pattern
+        $archiveName = "OptiScaler-v$version-source-complete-$commitDate-$shortSha.7z"
+        Write-Output "Archive name: $archiveName"
+        echo "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
       id: prepare_assets
 
     - name: Get component versions
@@ -270,8 +356,8 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.optiscaler_info.outputs.release_name }}
-        release_name: ${{ steps.optiscaler_info.outputs.release_name }} - Source Build
+        tag_name: ${{ steps.extract_version.outputs.release_name }}
+        release_name: ${{ steps.extract_version.outputs.release_name }} - Source Build
         body: |
           🔨 **Source Build Release**
           
@@ -279,7 +365,7 @@ jobs:
           
           ## 📦 Components Included
           
-          - **OptiScaler**: Built from source at commit [`${{ steps.optiscaler_info.outputs.commit_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.optiscaler_info.outputs.commit_sha }})
+          - **OptiScaler**: v${{ steps.extract_version.outputs.version }} built from source at commit [`${{ steps.extract_version.outputs.commit_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.extract_version.outputs.commit_sha }})
           - **dlssg-to-fsr3**: ${{ steps.get_versions.outputs.dlssg_version }} - `dlssg_to_fsr3_amd_is_better.dll`
           - **fakenvapi**: ${{ steps.get_versions.outputs.fakenvapi_version }} - `nvapi64.dll` and `fakenvapi.ini`
           
@@ -287,8 +373,9 @@ jobs:
           
           - **Source Repository**: [OptiScaler](https://github.com/optiscaler/OptiScaler)
           - **Branch**: master
-          - **Commit SHA**: `${{ steps.optiscaler_info.outputs.commit_sha }}`
-          - **Build Date**: ${{ steps.optiscaler_info.outputs.commit_date }}
+          - **Version**: ${{ steps.extract_version.outputs.version }}
+          - **Commit SHA**: `${{ steps.extract_version.outputs.commit_sha }}`
+          - **Build Date**: ${{ steps.extract_version.outputs.commit_date }}
           - **Trigger**: `${{ github.event_name }}`
           
           ## ⚠️ Important Notes
@@ -309,7 +396,7 @@ jobs:
           
           **Workflow Information:**
           - Build Workflow: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - Built with: MSBuild on Windows
+          - Built with: MSBuild on Windows following upstream approach
         draft: false
         prerelease: true
       id: create_release
@@ -360,6 +447,30 @@ jobs:
         
         Write-Output "🎉 All source build files uploaded successfully!"
 
+    - name: Build Summary
+      shell: powershell
+      run: |
+        Write-Output "=== 🚀 BUILD SUMMARY ==="
+        Write-Output ""
+        Write-Output "✅ Source Build Completed Successfully"
+        Write-Output ""
+        Write-Output "📦 Release Information:"
+        Write-Output "  • Tag: ${{ steps.extract_version.outputs.release_name }}"
+        Write-Output "  • Version: ${{ steps.extract_version.outputs.version }}"
+        Write-Output "  • Commit: ${{ steps.extract_version.outputs.commit_sha }}"
+        Write-Output "  • Build Date: ${{ steps.extract_version.outputs.commit_date }}"
+        Write-Output ""
+        Write-Output "🔧 Components Included:"
+        Write-Output "  • OptiScaler v${{ steps.extract_version.outputs.version }} (built from source)"
+        Write-Output "  • dlssg-to-fsr3 ${{ steps.get_versions.outputs.dlssg_version }}"
+        Write-Output "  • fakenvapi ${{ steps.get_versions.outputs.fakenvapi_version }}"
+        Write-Output ""
+        Write-Output "📄 Files Uploaded: ${{ steps.prepare_assets.outputs.files_count }}"
+        Write-Output ""
+        Write-Output "🎯 Release URL: ${{ steps.create_release.outputs.html_url }}"
+        Write-Output ""
+        Write-Output "=== ✨ Ready for Testing! ==="
+
     - name: Update repository description
       shell: powershell
       run: |
@@ -370,7 +481,7 @@ jobs:
         }
         
         $body = @{
-          description = "🚀 Automated releases for OptiScaler | Latest Source: ${{ steps.optiscaler_info.outputs.release_name }}"
+          description = "🚀 Automated releases for OptiScaler | Latest Source: ${{ steps.extract_version.outputs.release_name }}"
         } | ConvertTo-Json
         
         try {
