@@ -88,6 +88,17 @@ jobs:
         # Use the first artifact name for release naming (typically the main build)
         $mainArtifact = $buildArtifacts[0]
         
+        # For manual triggers, add timestamp to make tag unique
+        $baseArtifactName = $mainArtifact.name
+        if ("${{ github.event_name }}" -ne "schedule") {
+            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $uniqueArtifactName = "${baseArtifactName}-${timestamp}"
+            Write-Output "Manual trigger - using unique tag: $uniqueArtifactName"
+        } else {
+            $uniqueArtifactName = $baseArtifactName
+            Write-Output "Scheduled run - using standard tag: $uniqueArtifactName"
+        }
+        
         # Convert artifact IDs to JSON array for passing to next step
         $artifactIds = $buildArtifacts | ForEach-Object { $_.id }
         $artifactIdsJson = $artifactIds | ConvertTo-Json -Compress
@@ -95,7 +106,8 @@ jobs:
         echo "has_new_build=true" >> $env:GITHUB_OUTPUT
         echo "run_id=$runId" >> $env:GITHUB_OUTPUT
         echo "head_sha=$headSha" >> $env:GITHUB_OUTPUT
-        echo "artifact_name=$($mainArtifact.name)" >> $env:GITHUB_OUTPUT
+        echo "artifact_name=$uniqueArtifactName" >> $env:GITHUB_OUTPUT
+        echo "base_artifact_name=$baseArtifactName" >> $env:GITHUB_OUTPUT
         echo "artifact_ids=$artifactIdsJson" >> $env:GITHUB_OUTPUT
 
     - name: Download OptiScaler build artifacts
@@ -240,7 +252,7 @@ jobs:
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
-        $artifactName = "${{ steps.check_builds.outputs.artifact_name }}"
+        $artifactName = "${{ steps.check_builds.outputs.base_artifact_name }}"
         $packageName = "${artifactName}-BleedingEdge"
         $packagePath = "${{ github.workspace }}\${packageName}.zip"
         
@@ -279,7 +291,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.check_builds.outputs.artifact_name }}
-        release_name: ${{ steps.check_builds.outputs.artifact_name }} - Bleeding Edge
+        release_name: ${{ steps.check_builds.outputs.base_artifact_name }} - Bleeding Edge
         body: |
           🚀 **Automated Bleeding Edge Release**
           
@@ -308,7 +320,9 @@ jobs:
           
           **Build Information:**
           - OptiScaler Commit: `${{ steps.check_builds.outputs.head_sha }}`
-          - Build Date: ${{ github.run_id }}
+          - Base Artifact: `${{ steps.check_builds.outputs.base_artifact_name }}`
+          - Release Tag: `${{ steps.check_builds.outputs.artifact_name }}`
+          - Trigger: `${{ github.event_name }}`
           - Workflow Run: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
         draft: false
         prerelease: true
@@ -336,7 +350,7 @@ jobs:
         }
         
         $body = @{
-          description = "🚀 Automated bleeding-edge releases for OptiScaler | Latest: ${{ steps.check_builds.outputs.artifact_name }}"
+          description = "🚀 Automated bleeding-edge releases for OptiScaler | Latest: ${{ steps.check_builds.outputs.base_artifact_name }}"
         } | ConvertTo-Json
         
         try {
