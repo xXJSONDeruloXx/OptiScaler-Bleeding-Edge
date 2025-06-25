@@ -1,0 +1,394 @@
+name: Create Bleeding Edge Release
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+        - main
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  check-and-release:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Check for new OptiScaler builds
+      id: check_builds
+      shell: powershell
+      run: |
+        # Get the latest successful workflow run from OptiScaler repository
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        $workflowRuns = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/workflows/just_build.yml/runs?status=success&per_page=1" -Headers $headers
+        
+        if ($workflowRuns.workflow_runs.Count -eq 0) {
+            Write-Output "No successful builds found"
+            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
+            exit 0
+        }
+        
+        $latestRun = $workflowRuns.workflow_runs[0]
+        $runId = $latestRun.id
+        $headSha = $latestRun.head_sha
+        
+        Write-Output "Latest successful run ID: $runId"
+        Write-Output "Head SHA: $headSha"
+        
+        # Check if we already have a release for this SHA
+        $existingReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases" -Headers $headers
+        $existingRelease = $existingReleases | Where-Object { $_.body -like "*$headSha*" }
+        
+        if ($existingRelease) {
+            Write-Output "Release already exists for SHA: $headSha"
+            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
+            exit 0
+        }
+        
+        # Get artifacts from the successful run
+        $artifacts = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/runs/$runId/artifacts" -Headers $headers
+        
+        if ($artifacts.artifacts.Count -eq 0) {
+            Write-Output "No artifacts found for run $runId"
+            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
+            exit 0
+        }
+        
+        # Find the main build artifact (usually named something like "OptiScaler_v0.7.7-pre12_20250625")
+        $buildArtifact = $artifacts.artifacts | Where-Object { $_.name -like "OptiScaler_*" } | Select-Object -First 1
+        
+        if (-not $buildArtifact) {
+            Write-Output "Could not find OptiScaler build artifact"
+            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
+            exit 0
+        }
+        
+        Write-Output "Found new build artifact: $($buildArtifact.name)"
+        
+        echo "has_new_build=true" >> $env:GITHUB_OUTPUT
+        echo "run_id=$runId" >> $env:GITHUB_OUTPUT
+        echo "head_sha=$headSha" >> $env:GITHUB_OUTPUT
+        echo "artifact_name=$($buildArtifact.name)" >> $env:GITHUB_OUTPUT
+        echo "artifact_id=$($buildArtifact.id)" >> $env:GITHUB_OUTPUT
+
+    - name: Download OptiScaler build artifact
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        $artifactId = "${{ steps.check_builds.outputs.artifact_id }}"
+        $downloadUrl = "https://api.github.com/repos/optiscaler/OptiScaler/actions/artifacts/$artifactId/zip"
+        
+        Write-Output "Downloading artifact from: $downloadUrl"
+        
+        # Download the artifact
+        $zipPath = "${{ github.workspace }}\optiscaler-artifact.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -Headers $headers
+        
+        # Extract the artifact
+        $extractPath = "${{ github.workspace }}\x64\Release\a"
+        New-Item -ItemType Directory -Force -Path $extractPath
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        
+        Write-Output "Successfully downloaded and extracted OptiScaler artifact"
+
+    - name: Download latest dlssg-to-fsr3 release
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      id: dlssg_download
+      shell: powershell
+      run: |
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest"
+        
+        # Find the standard ZIP asset (not Universal or DLSSTweaks.Edition)
+        $asset = $releases.assets | Where-Object { 
+          $_.name -like "dlssg-to-fsr3-*.zip" -and 
+          $_.name -notlike "*Universal*" -and 
+          $_.name -notlike "*DLSSTweaks.Edition*" 
+        } | Select-Object -First 1
+        
+        if (-not $asset) {
+            Write-Error "Could not find appropriate dlssg-to-fsr3 release asset"
+            exit 1
+        }
+        
+        Write-Output "Downloading $($asset.name)..."
+        
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        $zipPath = "${{ github.workspace }}\dlssg-to-fsr3.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        
+        # Extract the ZIP file
+        $extractPath = "${{ github.workspace }}\dlssg-temp"
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        
+        # Find the DLL file in the extracted directory
+        $dllPath = Get-ChildItem -Path $extractPath -Recurse -Filter "dlssg_to_fsr3_amd_is_better.dll" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $dllPath) {
+            Write-Error "Could not find dlssg_to_fsr3_amd_is_better.dll in the extracted files"
+            exit 1
+        }
+        
+        # Copy the DLL to the artifact directory
+        Copy-Item -Path $dllPath -Destination "${{ github.workspace }}\x64\Release\a\"
+        
+        Write-Output "Successfully copied dlssg_to_fsr3_amd_is_better.dll to artifact directory"
+      continue-on-error: false
+    
+    - name: Download latest fakenvapi release
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      id: fakenvapi_download
+      shell: powershell
+      run: |
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
+        
+        # Find the fakenvapi.zip asset
+        $asset = $releases.assets | Where-Object { 
+          $_.name -eq "fakenvapi.zip"
+        } | Select-Object -First 1
+        
+        if (-not $asset) {
+            Write-Error "Could not find fakenvapi.zip in the latest release"
+            exit 1
+        }
+        
+        Write-Output "Downloading $($asset.name)..."
+        
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        $zipPath = "${{ github.workspace }}\fakenvapi.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        
+        # Extract the ZIP file
+        $extractPath = "${{ github.workspace }}\fakenvapi-temp"
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        
+        # Find the required files in the extracted directory
+        $nvapi64Path = Get-ChildItem -Path $extractPath -Recurse -Filter "nvapi64.dll" | Select-Object -First 1 -ExpandProperty FullName
+        $fakenvApiIniPath = Get-ChildItem -Path $extractPath -Recurse -Filter "fakenvapi.ini" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $nvapi64Path) {
+            Write-Error "Could not find nvapi64.dll in the extracted files"
+            exit 1
+        }
+        
+        if (-not $fakenvApiIniPath) {
+            Write-Error "Could not find fakenvapi.ini in the extracted files"
+            exit 1
+        }
+        
+        # Copy the files to the artifact directory
+        Copy-Item -Path $nvapi64Path -Destination "${{ github.workspace }}\x64\Release\a\"
+        Copy-Item -Path $fakenvApiIniPath -Destination "${{ github.workspace }}\x64\Release\a\"
+        
+        Write-Output "Successfully copied nvapi64.dll and fakenvapi.ini to artifact directory"
+      continue-on-error: false
+    
+    - name: Download latest Streamline SDK
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      id: streamline_download
+      shell: powershell
+      run: |
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
+        
+        # Find the streamline-sdk zip asset
+        $asset = $releases.assets | Where-Object { 
+          $_.name -match "streamline-sdk.*\.zip" -or
+          $_.name -match "streamline-sdk-v\d+\.\d+\.\d+\.zip"
+        } | Select-Object -First 1
+        
+        if (-not $asset) {
+            Write-Error "Could not find streamline-sdk zip in the latest release"
+            exit 1
+        }
+        
+        Write-Output "Downloading $($asset.name)..."
+        
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        $zipPath = "${{ github.workspace }}\streamline-sdk.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        
+        # Extract the ZIP file
+        $extractPath = "${{ github.workspace }}\streamline-temp"
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        
+        # Find the nvngx_dlss.dll file in the extracted directory (search all possible locations)
+        $nvngxDlssPath = Get-ChildItem -Path $extractPath -Recurse -Filter "nvngx_dlss.dll" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $nvngxDlssPath) {
+            Write-Error "Could not find nvngx_dlss.dll in the extracted files"
+            exit 1
+        }
+        
+        Write-Output "Found nvngx_dlss.dll at: $nvngxDlssPath"
+        
+        # Copy the file to the artifact directory and rename it to nvngx.dll
+        Copy-Item -Path $nvngxDlssPath -Destination "${{ github.workspace }}\x64\Release\a\nvngx.dll"
+        
+        Write-Output "Successfully copied nvngx_dlss.dll to artifact directory as nvngx.dll"
+      continue-on-error: false
+
+    - name: List consolidated artifacts
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        Write-Output "Contents of consolidated artifact directory:"
+        Get-ChildItem -Path "${{ github.workspace }}\x64\Release\a" -Recurse | ForEach-Object {
+            Write-Output "  $($_.Name) ($($_.Length) bytes)"
+        }
+
+    - name: Create consolidated release package
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        $artifactName = "${{ steps.check_builds.outputs.artifact_name }}"
+        $packageName = "${artifactName}-BleedingEdge"
+        $packagePath = "${{ github.workspace }}\${packageName}.zip"
+        
+        # Create ZIP package with all consolidated artifacts
+        Compress-Archive -Path "${{ github.workspace }}\x64\Release\a\*" -DestinationPath $packagePath -Force
+        
+        Write-Output "Created package: $packageName.zip"
+        echo "package_name=$packageName" >> $env:GITHUB_OUTPUT
+        echo "package_path=$packagePath" >> $env:GITHUB_OUTPUT
+      id: create_package
+
+    - name: Get component versions
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        # Get dlssg-to-fsr3 version
+        $dlssgRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest"
+        $dlssgVersion = $dlssgRelease.tag_name
+        
+        # Get fakenvapi version
+        $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
+        $fakenvApiVersion = $fakenvApiRelease.tag_name
+        
+        # Get Streamline SDK version
+        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
+        $streamlineVersion = $streamlineRelease.tag_name
+        
+        echo "dlssg_version=$dlssgVersion" >> $env:GITHUB_OUTPUT
+        echo "fakenvapi_version=$fakenvApiVersion" >> $env:GITHUB_OUTPUT
+        echo "streamline_version=$streamlineVersion" >> $env:GITHUB_OUTPUT
+        
+        Write-Output "Component versions:"
+        Write-Output "  dlssg-to-fsr3: $dlssgVersion"
+        Write-Output "  fakenvapi: $fakenvApiVersion" 
+        Write-Output "  Streamline SDK: $streamlineVersion"
+      id: get_versions
+
+    - name: Create GitHub Release
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.check_builds.outputs.artifact_name }}
+        release_name: ${{ steps.check_builds.outputs.artifact_name }} - Bleeding Edge
+        body: |
+          🚀 **Automated Bleeding Edge Release**
+          
+          This release contains the latest bleeding-edge build of OptiScaler combined with the latest versions of complementary tools.
+          
+          ## 📦 Components Included
+          
+          - **OptiScaler**: Latest successful build from commit [`${{ steps.check_builds.outputs.head_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.check_builds.outputs.head_sha }})
+          - **dlssg-to-fsr3**: ${{ steps.get_versions.outputs.dlssg_version }} - `dlssg_to_fsr3_amd_is_better.dll`
+          - **fakenvapi**: ${{ steps.get_versions.outputs.fakenvapi_version }} - `nvapi64.dll` and `fakenvapi.ini`
+          - **Streamline SDK**: ${{ steps.get_versions.outputs.streamline_version }} - `nvngx.dll` (renamed from `nvngx_dlss.dll`)
+          
+          ## ⚠️ Important Notes
+          
+          - This is a **bleeding-edge** release based on the latest successful build
+          - May contain experimental features or bugs
+          - Use at your own risk in production environments
+          - For stable releases, use the official [OptiScaler releases](https://github.com/optiscaler/OptiScaler/releases)
+          
+          ## 🔧 Installation
+          
+          1. Download the ZIP file below
+          2. Extract all files to your game directory
+          3. Follow the OptiScaler documentation for configuration
+          
+          ---
+          
+          **Build Information:**
+          - OptiScaler Commit: `${{ steps.check_builds.outputs.head_sha }}`
+          - Build Date: ${{ github.run_id }}
+          - Workflow Run: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        draft: false
+        prerelease: true
+      id: create_release
+
+    - name: Upload Release Asset
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ${{ steps.create_package.outputs.package_path }}
+        asset_name: ${{ steps.create_package.outputs.package_name }}.zip
+        asset_content_type: application/zip
+
+    - name: Update repository description
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+          'Content-Type' = 'application/json'
+        }
+        
+        $body = @{
+          description = "🚀 Automated bleeding-edge releases for OptiScaler | Latest: ${{ steps.check_builds.outputs.artifact_name }}"
+        } | ConvertTo-Json
+        
+        try {
+          Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}" -Method PATCH -Headers $headers -Body $body
+          Write-Output "Updated repository description"
+        } catch {
+          Write-Output "Failed to update repository description: $($_.Exception.Message)"
+        }
+
+    - name: Cleanup temporary files
+      if: always()
+      shell: powershell
+      run: |
+        # Clean up temporary directories and files
+        $tempPaths = @(
+          "${{ github.workspace }}\dlssg-temp",
+          "${{ github.workspace }}\fakenvapi-temp", 
+          "${{ github.workspace }}\streamline-temp",
+          "${{ github.workspace }}\*.zip"
+        )
+        
+        foreach ($path in $tempPaths) {
+          if (Test-Path $path) {
+            Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Cleaned up: $path"
+          }
+        }
