@@ -1,151 +1,129 @@
-name: Create Bleeding Edge Release
+name: Build and Release from Source
 
 on:
-  schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
+  # Monitor upstream OptiScaler repository for pushes to master
+  repository_dispatch:
+    types: [upstream-push]
   workflow_dispatch:
-#   push:
-#     branches:
-#         - main
+  push:
+    branches:
+        - main
 
 permissions:
   contents: write
   actions: read
 
 jobs:
-  check-and-release:
+  build-and-release:
     runs-on: windows-latest
     
     steps:
-    - name: Checkout repository
+    - name: Checkout this repository
       uses: actions/checkout@v4
-      
-    - name: Check for new OptiScaler builds
-      id: check_builds
-      shell: powershell
-      run: |
-        # Get the latest successful workflow run from OptiScaler repository
-        $headers = @{
-          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
-          'Accept' = 'application/vnd.github.v3+json'
-        }
-        
-        $workflowRuns = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/workflows/just_build.yml/runs?status=success&per_page=1" -Headers $headers
-        
-        if ($workflowRuns.workflow_runs.Count -eq 0) {
-            Write-Output "No successful builds found"
-            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
-            exit 0
-        }
-        
-        $latestRun = $workflowRuns.workflow_runs[0]
-        $runId = $latestRun.id
-        $headSha = $latestRun.head_sha
-        
-        Write-Output "Latest successful run ID: $runId"
-        Write-Output "Head SHA: $headSha"
-        
-        # Only check for existing releases if this is a scheduled run
-        # For manual dispatch or push events, always proceed
-        if ("${{ github.event_name }}" -eq "schedule") {
-            Write-Output "Scheduled run - checking for existing releases..."
-            $existingReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases" -Headers $headers
-            $existingRelease = $existingReleases | Where-Object { $_.body -like "*$headSha*" }
-            
-            if ($existingRelease) {
-                Write-Output "Release already exists for SHA: $headSha"
-                echo "has_new_build=false" >> $env:GITHUB_OUTPUT
-                exit 0
-            }
-        } else {
-            Write-Output "Manual trigger (${{ github.event_name }}) - proceeding regardless of existing releases"
-        }
-        
-        # Get artifacts from the successful run
-        $artifacts = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/runs/$runId/artifacts" -Headers $headers
-        
-        if ($artifacts.artifacts.Count -eq 0) {
-            Write-Output "No artifacts found for run $runId"
-            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
-            exit 0
-        }
-        
-        # Find all OptiScaler build artifacts
-        $buildArtifacts = $artifacts.artifacts | Where-Object { $_.name -like "OptiScaler_*" }
-        
-        if ($buildArtifacts.Count -eq 0) {
-            Write-Output "Could not find OptiScaler build artifacts"
-            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
-            exit 0
-        }
-        
-        Write-Output "Found $($buildArtifacts.Count) build artifacts:"
-        foreach ($artifact in $buildArtifacts) {
-            Write-Output "  - $($artifact.name) (ID: $($artifact.id))"
-        }
-        
-        # Use the first artifact name for release naming (typically the main build)
-        $mainArtifact = $buildArtifacts[0]
-        
-        # For manual triggers, add timestamp to make tag unique
-        $baseArtifactName = $mainArtifact.name
-        if ("${{ github.event_name }}" -ne "schedule") {
-            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-            $uniqueArtifactName = "${baseArtifactName}-${timestamp}"
-            Write-Output "Manual trigger - using unique tag: $uniqueArtifactName"
-        } else {
-            $uniqueArtifactName = $baseArtifactName
-            Write-Output "Scheduled run - using standard tag: $uniqueArtifactName"
-        }
-        
-        # Convert artifact IDs to JSON array for passing to next step
-        $artifactIds = $buildArtifacts | ForEach-Object { $_.id }
-        $artifactIdsJson = $artifactIds | ConvertTo-Json -Compress
-        
-        echo "has_new_build=true" >> $env:GITHUB_OUTPUT
-        echo "run_id=$runId" >> $env:GITHUB_OUTPUT
-        echo "head_sha=$headSha" >> $env:GITHUB_OUTPUT
-        echo "artifact_name=$uniqueArtifactName" >> $env:GITHUB_OUTPUT
-        echo "base_artifact_name=$baseArtifactName" >> $env:GITHUB_OUTPUT
-        echo "artifact_ids=$artifactIdsJson" >> $env:GITHUB_OUTPUT
 
-    - name: Download OptiScaler build artifacts
-      if: steps.check_builds.outputs.has_new_build == 'true'
+    - name: Checkout OptiScaler upstream repository
+      uses: actions/checkout@v4
+      with:
+        repository: optiscaler/OptiScaler
+        ref: master
+        path: optiscaler-source
+        
+    - name: Get OptiScaler commit info
+      id: optiscaler_info
       shell: powershell
       run: |
-        $headers = @{
-          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
-          'Accept' = 'application/vnd.github.v3+json'
+        cd optiscaler-source
+        $commitSha = git rev-parse HEAD
+        $shortSha = git rev-parse --short HEAD
+        $commitDate = Get-Date -Format "yyyyMMdd"
+        
+        Write-Output "OptiScaler HEAD SHA: $commitSha"
+        Write-Output "Short SHA: $shortSha"
+        Write-Output "Commit Date: $commitDate"
+        
+        # Create a unique release name
+        $releaseName = "OptiScaler-Source-$commitDate-$shortSha"
+        
+        echo "commit_sha=$commitSha" >> $env:GITHUB_OUTPUT
+        echo "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+        echo "commit_date=$commitDate" >> $env:GITHUB_OUTPUT
+        echo "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+
+    - name: Restore OptiScaler dependencies
+      shell: powershell
+      run: |
+        cd optiscaler-source
+        Write-Output "Restoring NuGet packages..."
+        nuget restore OptiScaler.sln
+
+    - name: Build OptiScaler
+      shell: powershell
+      run: |
+        cd optiscaler-source
+        Write-Output "Building OptiScaler..."
+        
+        # Build the solution
+        msbuild OptiScaler.sln /p:Configuration=Release /p:Platform=x64 /m
+        
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Build failed with exit code $LASTEXITCODE"
+            exit 1
         }
         
-        # Parse the artifact IDs from JSON
-        $artifactIds = '${{ steps.check_builds.outputs.artifact_ids }}' | ConvertFrom-Json
+        Write-Output "Build completed successfully!"
+
+    - name: Package OptiScaler build artifacts
+      shell: powershell
+      run: |
+        $commitDate = "${{ steps.optiscaler_info.outputs.commit_date }}"
+        $shortSha = "${{ steps.optiscaler_info.outputs.short_sha }}"
         
-        # Create the main extraction directory
-        $extractPath = "${{ github.workspace }}\x64\Release\a"
-        New-Item -ItemType Directory -Force -Path $extractPath
+        # Create artifact directory
+        $artifactDir = "${{ github.workspace }}\x64\Release\a"
+        New-Item -ItemType Directory -Force -Path $artifactDir
         
-        # Download and extract each artifact
-        foreach ($artifactId in $artifactIds) {
-            $downloadUrl = "https://api.github.com/repos/optiscaler/OptiScaler/actions/artifacts/$artifactId/zip"
-            
-            Write-Output "Downloading artifact ID $artifactId from: $downloadUrl"
-            
-            # Download the artifact
-            $zipPath = "${{ github.workspace }}\optiscaler-artifact-$artifactId.zip"
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -Headers $headers
-            
-            # Extract the artifact to the main directory
-            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-            
-            Write-Output "Successfully downloaded and extracted artifact ID: $artifactId"
+        # Copy built files from OptiScaler output
+        $sourceDir = "${{ github.workspace }}\optiscaler-source\x64\Release"
+        
+        if (Test-Path "$sourceDir\OptiScaler.dll") {
+            Copy-Item -Path "$sourceDir\OptiScaler.dll" -Destination $artifactDir
+            Write-Output "Copied OptiScaler.dll"
+        } else {
+            Write-Error "OptiScaler.dll not found in build output"
+            exit 1
         }
         
-        Write-Output "All OptiScaler artifacts downloaded and extracted"
+        # Look for other build outputs and copy them
+        $otherFiles = Get-ChildItem -Path $sourceDir -File | Where-Object { $_.Name -ne "OptiScaler.dll" }
+        foreach ($file in $otherFiles) {
+            Copy-Item -Path $file.FullName -Destination $artifactDir
+            Write-Output "Copied $($file.Name)"
+        }
+        
+        # Create a comprehensive archive of the build
+        $archiveName = "OptiScaler-Source-$commitDate-$shortSha.7z"
+        $archivePath = "$artifactDir\$archiveName"
+        
+        # Use 7z to create archive if available, otherwise use PowerShell compression
+        try {
+            $7zPath = Get-Command "7z.exe" -ErrorAction Stop
+            & $7zPath a -t7z "$archivePath" "$sourceDir\*"
+            Write-Output "Created 7z archive: $archiveName"
+        } catch {
+            # Fallback to ZIP if 7z not available
+            $zipName = "OptiScaler-Source-$commitDate-$shortSha.zip"
+            $zipPath = "$artifactDir\$zipName"
+            Compress-Archive -Path "$sourceDir\*" -DestinationPath $zipPath -Force
+            Write-Output "Created ZIP archive: $zipName (7z not available)"
+        }
 
     - name: Download latest dlssg-to-fsr3 release
-      if: steps.check_builds.outputs.has_new_build == 'true'
       id: dlssg_download
       shell: powershell
       run: |
@@ -190,7 +168,6 @@ jobs:
       continue-on-error: false
     
     - name: Download latest fakenvapi release
-      if: steps.check_builds.outputs.has_new_build == 'true'
       id: fakenvapi_download
       shell: powershell
       run: |
@@ -240,7 +217,6 @@ jobs:
       continue-on-error: false
 
     - name: List consolidated artifacts
-      if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
         Write-Output "Contents of consolidated artifact directory:"
@@ -248,11 +224,9 @@ jobs:
             Write-Output "  $($_.Name) ($($_.Length) bytes)"
         }
 
-    - name: Create consolidated release package
-      if: steps.check_builds.outputs.has_new_build == 'true'
+    - name: Prepare release assets
       shell: powershell
       run: |
-        # Instead of creating one big ZIP, we'll upload individual files
         # Get list of all files in the artifact directory for individual upload
         $artifactDir = "${{ github.workspace }}\x64\Release\a"
         $files = Get-ChildItem -Path $artifactDir -File
@@ -273,7 +247,6 @@ jobs:
       id: prepare_assets
 
     - name: Get component versions
-      if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
         # Get dlssg-to-fsr3 version
@@ -293,51 +266,55 @@ jobs:
       id: get_versions
 
     - name: Create GitHub Release
-      if: steps.check_builds.outputs.has_new_build == 'true'
       uses: actions/create-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.check_builds.outputs.artifact_name }}
-        release_name: ${{ steps.check_builds.outputs.base_artifact_name }} - Bleeding Edge
+        tag_name: ${{ steps.optiscaler_info.outputs.release_name }}
+        release_name: ${{ steps.optiscaler_info.outputs.release_name }} - Source Build
         body: |
-          🚀 **Automated Bleeding Edge Release**
+          🔨 **Source Build Release**
           
-          This release contains the latest bleeding-edge build of OptiScaler combined with the latest versions of complementary tools.
+          This release contains OptiScaler built from the latest source code, combined with the latest versions of complementary tools.
           
           ## 📦 Components Included
           
-          - **OptiScaler**: Latest successful build from commit [`${{ steps.check_builds.outputs.head_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.check_builds.outputs.head_sha }})
+          - **OptiScaler**: Built from source at commit [`${{ steps.optiscaler_info.outputs.commit_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.optiscaler_info.outputs.commit_sha }})
           - **dlssg-to-fsr3**: ${{ steps.get_versions.outputs.dlssg_version }} - `dlssg_to_fsr3_amd_is_better.dll`
           - **fakenvapi**: ${{ steps.get_versions.outputs.fakenvapi_version }} - `nvapi64.dll` and `fakenvapi.ini`
           
+          ## 🔧 Build Information
+          
+          - **Source Repository**: [OptiScaler](https://github.com/optiscaler/OptiScaler)
+          - **Branch**: master
+          - **Commit SHA**: `${{ steps.optiscaler_info.outputs.commit_sha }}`
+          - **Build Date**: ${{ steps.optiscaler_info.outputs.commit_date }}
+          - **Trigger**: `${{ github.event_name }}`
+          
           ## ⚠️ Important Notes
           
-          - This is a **bleeding-edge** release based on the latest successful build
-          - May contain experimental features or bugs
+          - This is a **pre-release** built from the latest source code
+          - May contain experimental features, bugs, or unstable code
           - Use at your own risk in production environments
-          - For stable releases, use the official [OptiScaler releases](https://github.com/optiscaler/OptiScaler/releases)
+          - For stable releases, use the main bleeding-edge releases or official [OptiScaler releases](https://github.com/optiscaler/OptiScaler/releases)
           
           ## 🔧 Installation
           
-          1. Download the ZIP file below
-          2. Extract all files to your game directory
-          3. Follow the OptiScaler documentation for configuration
+          1. Download the individual files below
+          2. Extract any archives if needed
+          3. Copy files to your game directory
+          4. Follow the OptiScaler documentation for configuration
           
           ---
           
-          **Build Information:**
-          - OptiScaler Commit: `${{ steps.check_builds.outputs.head_sha }}`
-          - Base Artifact: `${{ steps.check_builds.outputs.base_artifact_name }}`
-          - Release Tag: `${{ steps.check_builds.outputs.artifact_name }}`
-          - Trigger: `${{ github.event_name }}`
-          - Workflow Run: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          **Workflow Information:**
+          - Build Workflow: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - Built with: MSBuild on Windows
         draft: false
-        prerelease: false
+        prerelease: true
       id: create_release
 
     - name: Upload Release Assets
-      if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
         # Parse the files list and upload each one individually
@@ -359,6 +336,7 @@ jobs:
             $contentType = switch -Regex ($fileName) {
                 '\.dll$' { 'application/octet-stream' }
                 '\.7z$' { 'application/x-7z-compressed' }
+                '\.zip$' { 'application/zip' }
                 '\.ini$' { 'text/plain' }
                 default { 'application/octet-stream' }
             }
@@ -380,10 +358,9 @@ jobs:
             }
         }
         
-        Write-Output "🎉 All files uploaded successfully!"
+        Write-Output "🎉 All source build files uploaded successfully!"
 
     - name: Update repository description
-      if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
         $headers = @{
@@ -393,7 +370,7 @@ jobs:
         }
         
         $body = @{
-          description = "🚀 Automated bleeding-edge releases for OptiScaler | Latest: ${{ steps.check_builds.outputs.base_artifact_name }}"
+          description = "🚀 Automated releases for OptiScaler | Latest Source: ${{ steps.optiscaler_info.outputs.release_name }}"
         } | ConvertTo-Json
         
         try {
@@ -410,8 +387,8 @@ jobs:
         # Clean up temporary directories and files
         $tempPaths = @(
           "${{ github.workspace }}\dlssg-temp",
-          "${{ github.workspace }}\fakenvapi-temp", 
-          "${{ github.workspace }}\streamline-temp",
+          "${{ github.workspace }}\fakenvapi-temp",
+          "${{ github.workspace }}\optiscaler-source",
           "${{ github.workspace }}\*.zip"
         )
         
