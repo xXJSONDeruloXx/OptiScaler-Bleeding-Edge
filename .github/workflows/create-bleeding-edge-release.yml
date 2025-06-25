@@ -46,14 +46,20 @@ jobs:
         Write-Output "Latest successful run ID: $runId"
         Write-Output "Head SHA: $headSha"
         
-        # Check if we already have a release for this SHA
-        $existingReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases" -Headers $headers
-        $existingRelease = $existingReleases | Where-Object { $_.body -like "*$headSha*" }
-        
-        if ($existingRelease) {
-            Write-Output "Release already exists for SHA: $headSha"
-            echo "has_new_build=false" >> $env:GITHUB_OUTPUT
-            exit 0
+        # Only check for existing releases if this is a scheduled run
+        # For manual dispatch or push events, always proceed
+        if ("${{ github.event_name }}" -eq "schedule") {
+            Write-Output "Scheduled run - checking for existing releases..."
+            $existingReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases" -Headers $headers
+            $existingRelease = $existingReleases | Where-Object { $_.body -like "*$headSha*" }
+            
+            if ($existingRelease) {
+                Write-Output "Release already exists for SHA: $headSha"
+                echo "has_new_build=false" >> $env:GITHUB_OUTPUT
+                exit 0
+            }
+        } else {
+            Write-Output "Manual trigger (${{ github.event_name }}) - proceeding regardless of existing releases"
         }
         
         # Get artifacts from the successful run
