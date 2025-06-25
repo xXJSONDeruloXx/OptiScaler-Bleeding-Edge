@@ -201,52 +201,6 @@ jobs:
         
         Write-Output "Successfully copied nvapi64.dll and fakenvapi.ini to artifact directory"
       continue-on-error: false
-    
-    - name: Download latest Streamline SDK
-      if: steps.check_builds.outputs.has_new_build == 'true'
-      id: streamline_download
-      shell: powershell
-      run: |
-        # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
-        
-        # Find the streamline-sdk zip asset
-        $asset = $releases.assets | Where-Object { 
-          $_.name -match "streamline-sdk.*\.zip" -or
-          $_.name -match "streamline-sdk-v\d+\.\d+\.\d+\.zip"
-        } | Select-Object -First 1
-        
-        if (-not $asset) {
-            Write-Error "Could not find streamline-sdk zip in the latest release"
-            exit 1
-        }
-        
-        Write-Output "Downloading $($asset.name)..."
-        
-        # Download the asset
-        $downloadUrl = $asset.browser_download_url
-        $zipPath = "${{ github.workspace }}\streamline-sdk.zip"
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
-        
-        # Extract the ZIP file
-        $extractPath = "${{ github.workspace }}\streamline-temp"
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-        
-        # Find the nvngx_dlss.dll file in the extracted directory (search all possible locations)
-        $nvngxDlssPath = Get-ChildItem -Path $extractPath -Recurse -Filter "nvngx_dlss.dll" | Select-Object -First 1 -ExpandProperty FullName
-        
-        if (-not $nvngxDlssPath) {
-            Write-Error "Could not find nvngx_dlss.dll in the extracted files"
-            exit 1
-        }
-        
-        Write-Output "Found nvngx_dlss.dll at: $nvngxDlssPath"
-        
-        # Copy the file to the artifact directory and rename it to nvngx.dll
-        Copy-Item -Path $nvngxDlssPath -Destination "${{ github.workspace }}\x64\Release\a\nvngx.dll"
-        
-        Write-Output "Successfully copied nvngx_dlss.dll to artifact directory as nvngx.dll"
-      continue-on-error: false
 
     - name: List consolidated artifacts
       if: steps.check_builds.outputs.has_new_build == 'true'
@@ -285,18 +239,12 @@ jobs:
         $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
         $fakenvApiVersion = $fakenvApiRelease.tag_name
         
-        # Get Streamline SDK version
-        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
-        $streamlineVersion = $streamlineRelease.tag_name
-        
         echo "dlssg_version=$dlssgVersion" >> $env:GITHUB_OUTPUT
         echo "fakenvapi_version=$fakenvApiVersion" >> $env:GITHUB_OUTPUT
-        echo "streamline_version=$streamlineVersion" >> $env:GITHUB_OUTPUT
         
         Write-Output "Component versions:"
         Write-Output "  dlssg-to-fsr3: $dlssgVersion"
-        Write-Output "  fakenvapi: $fakenvApiVersion" 
-        Write-Output "  Streamline SDK: $streamlineVersion"
+        Write-Output "  fakenvapi: $fakenvApiVersion"
       id: get_versions
 
     - name: Create GitHub Release
@@ -317,7 +265,6 @@ jobs:
           - **OptiScaler**: Latest successful build from commit [`${{ steps.check_builds.outputs.head_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.check_builds.outputs.head_sha }})
           - **dlssg-to-fsr3**: ${{ steps.get_versions.outputs.dlssg_version }} - `dlssg_to_fsr3_amd_is_better.dll`
           - **fakenvapi**: ${{ steps.get_versions.outputs.fakenvapi_version }} - `nvapi64.dll` and `fakenvapi.ini`
-          - **Streamline SDK**: ${{ steps.get_versions.outputs.streamline_version }} - `nvngx.dll` (renamed from `nvngx_dlss.dll`)
           
           ## ⚠️ Important Notes
           
