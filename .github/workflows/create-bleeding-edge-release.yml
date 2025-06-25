@@ -65,24 +65,34 @@ jobs:
             exit 0
         }
         
-        # Find the main build artifact (usually named something like "OptiScaler_v0.7.7-pre12_20250625")
-        $buildArtifact = $artifacts.artifacts | Where-Object { $_.name -like "OptiScaler_*" } | Select-Object -First 1
+        # Find all OptiScaler build artifacts
+        $buildArtifacts = $artifacts.artifacts | Where-Object { $_.name -like "OptiScaler_*" }
         
-        if (-not $buildArtifact) {
-            Write-Output "Could not find OptiScaler build artifact"
+        if ($buildArtifacts.Count -eq 0) {
+            Write-Output "Could not find OptiScaler build artifacts"
             echo "has_new_build=false" >> $env:GITHUB_OUTPUT
             exit 0
         }
         
-        Write-Output "Found new build artifact: $($buildArtifact.name)"
+        Write-Output "Found $($buildArtifacts.Count) build artifacts:"
+        foreach ($artifact in $buildArtifacts) {
+            Write-Output "  - $($artifact.name) (ID: $($artifact.id))"
+        }
+        
+        # Use the first artifact name for release naming (typically the main build)
+        $mainArtifact = $buildArtifacts[0]
+        
+        # Convert artifact IDs to JSON array for passing to next step
+        $artifactIds = $buildArtifacts | ForEach-Object { $_.id }
+        $artifactIdsJson = $artifactIds | ConvertTo-Json -Compress
         
         echo "has_new_build=true" >> $env:GITHUB_OUTPUT
         echo "run_id=$runId" >> $env:GITHUB_OUTPUT
         echo "head_sha=$headSha" >> $env:GITHUB_OUTPUT
-        echo "artifact_name=$($buildArtifact.name)" >> $env:GITHUB_OUTPUT
-        echo "artifact_id=$($buildArtifact.id)" >> $env:GITHUB_OUTPUT
+        echo "artifact_name=$($mainArtifact.name)" >> $env:GITHUB_OUTPUT
+        echo "artifact_ids=$artifactIdsJson" >> $env:GITHUB_OUTPUT
 
-    - name: Download OptiScaler build artifact
+    - name: Download OptiScaler build artifacts
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
@@ -91,21 +101,30 @@ jobs:
           'Accept' = 'application/vnd.github.v3+json'
         }
         
-        $artifactId = "${{ steps.check_builds.outputs.artifact_id }}"
-        $downloadUrl = "https://api.github.com/repos/optiscaler/OptiScaler/actions/artifacts/$artifactId/zip"
+        # Parse the artifact IDs from JSON
+        $artifactIds = '${{ steps.check_builds.outputs.artifact_ids }}' | ConvertFrom-Json
         
-        Write-Output "Downloading artifact from: $downloadUrl"
-        
-        # Download the artifact
-        $zipPath = "${{ github.workspace }}\optiscaler-artifact.zip"
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -Headers $headers
-        
-        # Extract the artifact
+        # Create the main extraction directory
         $extractPath = "${{ github.workspace }}\x64\Release\a"
         New-Item -ItemType Directory -Force -Path $extractPath
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
         
-        Write-Output "Successfully downloaded and extracted OptiScaler artifact"
+        # Download and extract each artifact
+        foreach ($artifactId in $artifactIds) {
+            $downloadUrl = "https://api.github.com/repos/optiscaler/OptiScaler/actions/artifacts/$artifactId/zip"
+            
+            Write-Output "Downloading artifact ID $artifactId from: $downloadUrl"
+            
+            # Download the artifact
+            $zipPath = "${{ github.workspace }}\optiscaler-artifact-$artifactId.zip"
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -Headers $headers
+            
+            # Extract the artifact to the main directory
+            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+            
+            Write-Output "Successfully downloaded and extracted artifact ID: $artifactId"
+        }
+        
+        Write-Output "All OptiScaler artifacts downloaded and extracted"
 
     - name: Download latest dlssg-to-fsr3 release
       if: steps.check_builds.outputs.has_new_build == 'true'
