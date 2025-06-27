@@ -84,19 +84,21 @@ jobs:
         foreach ($artifact in $buildArtifacts) {
             Write-Output "  - $($artifact.name) (ID: $($artifact.id))"
         }
-        
-        # Use the first artifact name for release naming (typically the main build)
+          # Use the first artifact name for release naming (typically the main build)
         $mainArtifact = $buildArtifacts[0]
         
-        # For manual triggers, add timestamp to make tag unique
+        # Always add timestamp or SHA to make tag unique and avoid conflicts
         $baseArtifactName = $mainArtifact.name
-        if ("${{ github.event_name }}" -ne "schedule") {
+        if ("${{ github.event_name }}" -eq "schedule") {
+            # For scheduled runs, use short SHA to make it unique but predictable
+            $shortSha = $headSha.Substring(0, 8)
+            $uniqueArtifactName = "${baseArtifactName}-${shortSha}"
+            Write-Output "Scheduled run - using SHA-based tag: $uniqueArtifactName"
+        } else {
+            # For manual triggers, use timestamp to make it unique
             $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
             $uniqueArtifactName = "${baseArtifactName}-${timestamp}"
-            Write-Output "Manual trigger - using unique tag: $uniqueArtifactName"
-        } else {
-            $uniqueArtifactName = $baseArtifactName
-            Write-Output "Scheduled run - using standard tag: $uniqueArtifactName"
+            Write-Output "Manual trigger - using timestamp-based tag: $uniqueArtifactName"
         }
         
         # Convert artifact IDs to JSON array for passing to next step
