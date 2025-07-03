@@ -4,12 +4,18 @@ An automated release pipeline that monitors the [OptiScaler](https://github.com/
 
 ## What This Does
 
-1. **Monitors OptiScaler builds**: Checks the [OptiScaler build workflow](https://github.com/optiscaler/OptiScaler/actions/workflows/just_build.yml) for successful runs every 6 hours
-2. **Downloads all build artifacts**: Retrieves all OptiScaler build artifacts from successful builds
-3. **Fetches complementary tools**: Downloads the latest releases from:
+1. **Monitors OptiScaler builds**  
+   Checks the [OptiScaler build workflow](https://github.com/optiscaler/OptiScaler/actions/workflows/just_build.yml) for successful runs every 6 hours.
+2. **Downloads all build artifacts**  
+   Retrieves all OptiScaler build artifacts from successful builds.
+3. **Fetches complementary tools**  
+   Downloads the latest releases from:
    - [dlssg-to-fsr3](https://github.com/xXJSONDeruloXx/dlssg-to-fsr3) (standard edition only)
    - [fakenvapi](https://github.com/FakeMichau/fakenvapi)
-4. **Creates consolidated releases**: Packages all components together with detailed release notes
+   - **FSR4 DLL**: Downloads the latest `amdxcffx64.dll` (FSR4)  
+     > *FSR4 DLL build pipeline inspired by [kellerbraune/amd-fsr4](https://github.com/kellerbraune/amd-fsr4)*
+4. **Creates consolidated releases**  
+   Packages all components together with detailed release notes.
 5. **Smart release management**: Avoids duplicate releases for the same OptiScaler commit (scheduled runs only)
 
 ## Automation Schedule

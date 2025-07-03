@@ -5,9 +5,9 @@ on:
     # Run every 6 hours
     - cron: '0 */6 * * *'
   workflow_dispatch:
-#   push:
-#     branches:
-#         - main
+  push:
+    branches:
+        - fsr4
 
 permissions:
   contents: write
@@ -241,6 +241,77 @@ jobs:
         Write-Output "Successfully copied nvapi64.dll and fakenvapi.ini to artifact directory"
       continue-on-error: false
 
+    - name: Download FSR4 DLL
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      id: fsr4_download
+      shell: powershell
+      run: |
+        # Hardcoded download URL for FSR4 DLL
+        $downloadUrl = "https://download.amd.com/dir/bin/amdxcffx64.dll/67D435F7d97000/amdxcffx64.dll"
+        $filename = [System.IO.Path]::GetFileName($downloadUrl)
+        $filePath = "${{ github.workspace }}\$filename"
+        
+        Write-Output "Downloading FSR4 DLL from: $downloadUrl"
+        
+        # Set headers to mimic browser request
+        $headers = @{
+          'Referer' = 'https://www.amd.com'
+          'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        try {
+          # Download the file
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $filePath -Headers $headers
+          Write-Output "Successfully downloaded: $filename"
+          
+          # Check if it's an executable and extract if needed
+          $extension = [System.IO.Path]::GetExtension($filename).ToLower()
+          $dllPath = "${{ github.workspace }}\amdxcffx64.dll"
+          
+          if ($extension -eq ".exe") {
+            Write-Output "Extracting amdxcffx64.dll from executable..."
+            
+            # Use 7zip to extract (if available), otherwise try expand-archive
+            try {
+              & 7z e -r $filePath "amdxcffx64.dll" -o"${{ github.workspace }}"
+              Write-Output "Extracted using 7zip"
+            } catch {
+              Write-Output "7zip not available, attempting alternative extraction..."
+              # For .exe files, we might need to use a different approach
+              # For now, assume the downloaded file is the DLL itself
+              Copy-Item -Path $filePath -Destination $dllPath
+            }
+          } else {
+            # If it's already a DLL, just rename/copy it
+            Copy-Item -Path $filePath -Destination $dllPath
+            Write-Output "File is already a DLL, copied directly"
+          }
+          
+          # Verify the DLL exists
+          if (-not (Test-Path $dllPath)) {
+            Write-Error "amdxcffx64.dll not found after download/extraction"
+            exit 1
+          }
+          
+          # Get file hash for verification
+          $hash = Get-FileHash -Path $dllPath -Algorithm SHA256
+          Write-Output "FSR4 DLL SHA256: $($hash.Hash)"
+          
+          # Copy to the artifact directory
+          Copy-Item -Path $dllPath -Destination "${{ github.workspace }}\x64\Release\a\"
+          Write-Output "Successfully copied amdxcffx64.dll to artifact directory"
+          
+          # Store version info (using current date as fallback)
+          $productVersion = "manual-tag-$(Get-Date -Format 'yyyyMMdd')"
+          echo "fsr4_version=$productVersion" >> $env:GITHUB_OUTPUT
+          echo "fsr4_hash=$($hash.Hash)" >> $env:GITHUB_OUTPUT
+          
+        } catch {
+          Write-Error "Failed to download or process FSR4 DLL: $($_.Exception.Message)"
+          exit 1
+        }
+      continue-on-error: false
+
     - name: List consolidated artifacts
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
@@ -286,12 +357,20 @@ jobs:
         $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
         $fakenvApiVersion = $fakenvApiRelease.tag_name
         
+        # FSR4 version is already set from the download step
+        $fsr4Version = "${{ steps.fsr4_download.outputs.fsr4_version }}"
+        $fsr4Hash = "${{ steps.fsr4_download.outputs.fsr4_hash }}"
+        
         echo "dlssg_version=$dlssgVersion" >> $env:GITHUB_OUTPUT
         echo "fakenvapi_version=$fakenvApiVersion" >> $env:GITHUB_OUTPUT
+        echo "fsr4_version=$fsr4Version" >> $env:GITHUB_OUTPUT
+        echo "fsr4_hash=$fsr4Hash" >> $env:GITHUB_OUTPUT
         
         Write-Output "Component versions:"
         Write-Output "  dlssg-to-fsr3: $dlssgVersion"
         Write-Output "  fakenvapi: $fakenvApiVersion"
+        Write-Output "  FSR4 DLL: $fsr4Version"
+        Write-Output "  FSR4 Hash: $fsr4Hash"
       id: get_versions
 
     - name: Create GitHub Release
@@ -312,6 +391,7 @@ jobs:
           - **OptiScaler**: Latest successful build from commit [`${{ steps.check_builds.outputs.head_sha }}`](https://github.com/optiscaler/OptiScaler/commit/${{ steps.check_builds.outputs.head_sha }})
           - **dlssg-to-fsr3**: ${{ steps.get_versions.outputs.dlssg_version }} - `dlssg_to_fsr3_amd_is_better.dll`
           - **fakenvapi**: ${{ steps.get_versions.outputs.fakenvapi_version }} - `nvapi64.dll` and `fakenvapi.ini`
+          - **FSR4 DLL**: ${{ steps.get_versions.outputs.fsr4_version }} - `amdxcffx64.dll`
           
           ## ⚠️ Important Notes
           
@@ -325,6 +405,10 @@ jobs:
           1. Download the ZIP file below
           2. Extract all files to your game directory
           3. Follow the OptiScaler documentation for configuration
+          
+          ## 🔍 File Verification
+          
+          **FSR4 DLL Hash (SHA256):** `${{ steps.get_versions.outputs.fsr4_hash }}`
           
           ---
           
@@ -414,6 +498,8 @@ jobs:
           "${{ github.workspace }}\dlssg-temp",
           "${{ github.workspace }}\fakenvapi-temp", 
           "${{ github.workspace }}\streamline-temp",
+          "${{ github.workspace }}\*.exe",
+          "${{ github.workspace }}\amdxcffx64.dll",
           "${{ github.workspace }}\*.zip"
         )
         
