@@ -335,18 +335,31 @@ jobs:
         $files = Get-ChildItem -Path $artifactDir -File
         
         $fileList = @()
+        $fileDetails = @()
         foreach ($file in $files) {
+            # Calculate SHA256 hash for each file
+            $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256
+            
             $fileList += @{
                 "path" = $file.FullName
                 "name" = $file.Name
             }
-            Write-Output "Will upload: $($file.Name) ($($file.Length) bytes)"
+            
+            $fileDetails += @{
+                "name" = $file.Name
+                "sha256hash" = $hash.Hash.ToLower()
+                "size" = $file.Length
+            }
+            
+            Write-Output "Will upload: $($file.Name) ($($file.Length) bytes) - SHA256: $($hash.Hash)"
         }
         
         # Convert to JSON for passing to upload steps
         $filesJson = $fileList | ConvertTo-Json -Compress
+        $fileDetailsJson = $fileDetails | ConvertTo-Json -Compress
         echo "files_to_upload=$filesJson" >> $env:GITHUB_OUTPUT
         echo "files_count=$($fileList.Count)" >> $env:GITHUB_OUTPUT
+        echo "file_details=$fileDetailsJson" >> $env:GITHUB_OUTPUT
       id: prepare_assets
 
     - name: Get component versions
@@ -377,6 +390,33 @@ jobs:
         Write-Output "  FSR4 Hash: $fsr4Hash"
       id: get_versions
 
+    - name: Format file details for release
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        # Parse the file details from JSON
+        $fileDetails = '${{ steps.prepare_assets.outputs.file_details }}' | ConvertFrom-Json
+        
+        # Format as JSON array for release notes
+        $formattedDetails = @()
+        foreach ($file in $fileDetails) {
+            # We'll add the download URL after the release is created
+            $formattedDetails += @{
+                "name" = $file.name
+                "sha256hash" = $file.sha256hash
+                "size" = $file.size
+            }
+        }
+        
+        # Convert to nicely formatted JSON
+        $jsonOutput = $formattedDetails | ConvertTo-Json -Depth 3
+        
+        # Store the formatted JSON for use in release notes
+        echo "formatted_file_details<<EOF" >> $env:GITHUB_OUTPUT
+        echo $jsonOutput >> $env:GITHUB_OUTPUT
+        echo "EOF" >> $env:GITHUB_OUTPUT
+      id: format_file_details
+
     - name: Create GitHub Release
       if: steps.check_builds.outputs.has_new_build == 'true'
       uses: actions/create-release@v1
@@ -406,11 +446,17 @@ jobs:
           
           ## 🔧 Installation
           
-          1. Download the ZIP file below
-          2. Extract all files to your game directory
+          1. Download the individual files below or use the release assets
+          2. Extract/copy all files to your game directory
           3. Follow the OptiScaler documentation for configuration
           
-          ## 🔍 File Verification
+          ## � Release Artifacts Details
+          
+          ```json
+          ${{ steps.format_file_details.outputs.formatted_file_details }}
+          ```
+          
+          ## 🔍 Quick Verification
           
           **FSR4 DLL Hash (SHA256):** `${{ steps.get_versions.outputs.fsr4_hash }}`
           
