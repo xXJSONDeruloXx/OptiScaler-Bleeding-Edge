@@ -36,6 +36,7 @@ Each release contains individual files (not zipped):
 - **OptiScaler**: All build artifacts from the latest successful build
 - **dlssg-to-fsr3**: `dlssg_to_fsr3_amd_is_better.dll` (standard edition, excludes Universal and DLSSTweaks variants)
 - **fakenvapi**: `nvapi64.dll` and `fakenvapi.ini`
+- **AMD FSR 4 DLL**: `amdxcffx64.dll`
 
 ## Release Features
 

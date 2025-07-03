@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-        - fsr4
+        - main
 
 permissions:
   contents: write
