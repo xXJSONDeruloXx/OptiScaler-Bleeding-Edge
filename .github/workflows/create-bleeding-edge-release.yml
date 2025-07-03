@@ -282,9 +282,13 @@ jobs:
               Copy-Item -Path $filePath -Destination $dllPath
             }
           } else {
-            # If it's already a DLL, just rename/copy it
-            Copy-Item -Path $filePath -Destination $dllPath
-            Write-Output "File is already a DLL, copied directly"
+            # If it's already a DLL, check if we need to rename it
+            if ($filePath -ne $dllPath) {
+              Copy-Item -Path $filePath -Destination $dllPath
+              Write-Output "File is already a DLL, copied to standard location"
+            } else {
+              Write-Output "File is already a DLL at the correct location"
+            }
           }
           
           # Verify the DLL exists
