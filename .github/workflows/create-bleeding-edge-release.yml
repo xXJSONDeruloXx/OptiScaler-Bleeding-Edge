@@ -437,9 +437,9 @@ jobs:
         Get-ChildItem -Path $bundledPath -Recurse | ForEach-Object {
             $relativePath = $_.FullName.Replace($bundledPath, "").TrimStart('\')
             if ($_.PSIsContainer) {
-                Write-Output "  📁 $relativePath/"
+                Write-Output "  [DIR] $relativePath/"
             } else {
-                Write-Output "  📄 $relativePath ($($_.Length) bytes)"
+                Write-Output "  [FILE] $relativePath ($($_.Length) bytes)"
             }
         }
         
