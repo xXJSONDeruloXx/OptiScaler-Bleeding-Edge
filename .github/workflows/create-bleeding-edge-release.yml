@@ -371,11 +371,92 @@ jobs:
             Write-Output "  $($_.Name) ($($_.Length) bytes)"
         }
 
+    - name: Create bundled release package
+      if: steps.check_builds.outputs.has_new_build == 'true'
+      shell: powershell
+      run: |
+        $artifactDir = "${{ github.workspace }}\x64\Release\a"
+        
+        # Find the OptiScaler 7z file
+        $optiscaler7z = Get-ChildItem -Path $artifactDir -Filter "*.7z" | Select-Object -First 1
+        
+        if (-not $optiscaler7z) {
+            Write-Error "Could not find OptiScaler 7z file in artifact directory"
+            exit 1
+        }
+        
+        Write-Output "Found OptiScaler 7z file: $($optiscaler7z.Name)"
+        
+        # Extract the 7z file contents
+        $extractPath = "${{ github.workspace }}\optiscaler-extracted"
+        New-Item -ItemType Directory -Force -Path $extractPath
+        
+        # Use 7zip to extract the OptiScaler 7z file
+        try {
+            & 7z x -o"$extractPath" $optiscaler7z.FullName
+            Write-Output "Successfully extracted OptiScaler 7z file"
+        } catch {
+            Write-Error "Failed to extract OptiScaler 7z file: $($_.Exception.Message)"
+            exit 1
+        }
+        
+        # Create bundled directory
+        $bundledPath = "${{ github.workspace }}\bundled"
+        New-Item -ItemType Directory -Force -Path $bundledPath
+        
+        # Copy all extracted OptiScaler files to bundled directory
+        Copy-Item -Path "$extractPath\*" -Destination $bundledPath -Recurse -Force
+        Write-Output "Copied OptiScaler files to bundled directory"
+        
+        # Get all additional files (excluding the 7z file and any duplicate OptiScaler.dll)
+        $additionalFiles = Get-ChildItem -Path $artifactDir -File | Where-Object { 
+            $_.Extension -ne ".7z" -and 
+            -not ($_.Name -eq "OptiScaler.dll" -and (Test-Path "$bundledPath\OptiScaler.dll"))
+        }
+        
+        # Copy additional files to bundled directory
+        foreach ($file in $additionalFiles) {
+            Copy-Item -Path $file.FullName -Destination $bundledPath -Force
+            Write-Output "Added to bundle: $($file.Name)"
+        }
+        
+        # Create the bundled 7z file
+        $bundledName = $optiscaler7z.BaseName -replace "^OptiScaler_", "BUNDLED_OptiScaler_"
+        $bundled7zPath = "${{ github.workspace }}\$bundledName.7z"
+        
+        try {
+            & 7z a -t7z -mx=9 $bundled7zPath "$bundledPath\*"
+            Write-Output "Successfully created bundled 7z: $bundledName.7z"
+        } catch {
+            Write-Error "Failed to create bundled 7z file: $($_.Exception.Message)"
+            exit 1
+        }
+        
+        # List contents of bundled directory for verification
+        Write-Output "Contents of bundled package:"
+        Get-ChildItem -Path $bundledPath -Recurse | ForEach-Object {
+            $relativePath = $_.FullName.Replace($bundledPath, "").TrimStart('\')
+            if ($_.PSIsContainer) {
+                Write-Output "  📁 $relativePath/"
+            } else {
+                Write-Output "  📄 $relativePath ($($_.Length) bytes)"
+            }
+        }
+        
+        # Calculate hash for bundled 7z
+        $bundledHash = Get-FileHash -Path $bundled7zPath -Algorithm SHA256
+        
+        # Store bundled file info
+        echo "bundled_7z_path=$bundled7zPath" >> $env:GITHUB_OUTPUT
+        echo "bundled_7z_name=$bundledName.7z" >> $env:GITHUB_OUTPUT
+        echo "bundled_7z_hash=$($bundledHash.Hash.ToLower())" >> $env:GITHUB_OUTPUT
+        echo "bundled_7z_size=$((Get-Item $bundled7zPath).Length)" >> $env:GITHUB_OUTPUT
+      id: create_bundle
+
     - name: Create consolidated release package
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
-        # Instead of creating one big ZIP, we'll upload individual files
         # Get list of all files in the artifact directory for individual upload
         $artifactDir = "${{ github.workspace }}\x64\Release\a"
         $files = Get-ChildItem -Path $artifactDir -File
@@ -399,6 +480,25 @@ jobs:
             
             Write-Output "Will upload: $($file.Name) ($($file.Length) bytes) - SHA256: $($hash.Hash)"
         }
+        
+        # Add the bundled 7z file to the upload list
+        $bundled7zPath = "${{ steps.create_bundle.outputs.bundled_7z_path }}"
+        $bundled7zName = "${{ steps.create_bundle.outputs.bundled_7z_name }}"
+        $bundled7zHash = "${{ steps.create_bundle.outputs.bundled_7z_hash }}"
+        $bundled7zSize = "${{ steps.create_bundle.outputs.bundled_7z_size }}"
+        
+        $fileList += @{
+            "path" = $bundled7zPath
+            "name" = $bundled7zName
+        }
+        
+        $fileDetails += @{
+            "name" = $bundled7zName
+            "sha256hash" = $bundled7zHash
+            "size" = [int]$bundled7zSize
+        }
+        
+        Write-Output "Will upload bundled: $bundled7zName ($bundled7zSize bytes) - SHA256: $bundled7zHash"
         
         # Convert to JSON for passing to upload steps
         $filesJson = $fileList | ConvertTo-Json -Compress
@@ -490,6 +590,12 @@ jobs:
           - **Streamline SDK**: ${{ steps.get_versions.outputs.streamline_version }} - `nvngx.dll` (renamed from `nvngx_dlss.dll`)
           - **FSR4 DLL**: ${{ steps.get_versions.outputs.fsr4_version }} - `amdxcffx64.dll`
           
+          ## 🎁 Download Options
+          
+          - **📦 Bundled Package**: `${{ steps.create_bundle.outputs.bundled_7z_name }}` - Contains all components in one convenient package
+          - **📁 Individual Files**: Download specific components separately from the assets below
+          - **📄 Original OptiScaler Package**: The original 7z file from the OptiScaler repository
+          
           ## ⚠️ Important Notes
           
           - This is a **bleeding-edge** release based on the latest successful build
@@ -499,11 +605,11 @@ jobs:
           
           ## 🔧 Installation
           
-          1. Download the individual files below or use the release assets
-          2. Extract/copy all files to your game directory
+          1. **Option A (Recommended)**: Download the bundled package `${{ steps.create_bundle.outputs.bundled_7z_name }}` and extract all files to your game directory
+          2. **Option B**: Download individual files below or use the release assets
           3. Follow the OptiScaler documentation for configuration
           
-          ## � Release Artifacts Details
+          ## 📋 Release Artifacts Details
           
           ```json
           ${{ steps.format_file_details.outputs.formatted_file_details }}
@@ -512,6 +618,7 @@ jobs:
           ## 🔍 Quick Verification
           
           **FSR4 DLL Hash (SHA256):** `${{ steps.get_versions.outputs.fsr4_hash }}`
+          **Bundled Package Hash (SHA256):** `${{ steps.create_bundle.outputs.bundled_7z_hash }}`
           
           ---
           
@@ -601,9 +708,12 @@ jobs:
           "${{ github.workspace }}\dlssg-temp",
           "${{ github.workspace }}\fakenvapi-temp", 
           "${{ github.workspace }}\streamline-temp",
+          "${{ github.workspace }}\optiscaler-extracted",
+          "${{ github.workspace }}\bundled",
           "${{ github.workspace }}\*.exe",
           "${{ github.workspace }}\amdxcffx64.dll",
-          "${{ github.workspace }}\*.zip"
+          "${{ github.workspace }}\*.zip",
+          "${{ github.workspace }}\BUNDLED_*.7z"
         )
         
         foreach ($path in $tempPaths) {
