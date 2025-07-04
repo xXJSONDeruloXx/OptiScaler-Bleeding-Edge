@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-        - sha-for-decky
+        - main
 
 permissions:
   contents: write
