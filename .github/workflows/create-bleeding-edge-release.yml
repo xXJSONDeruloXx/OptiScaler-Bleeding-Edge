@@ -199,13 +199,14 @@ jobs:
         # Get the latest release info from the API
         $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
         
-        # Find the fakenvapi.zip asset
+        # Find the fakenvapi asset with flexible naming (zip or 7z)
         $asset = $releases.assets | Where-Object { 
-          $_.name -eq "fakenvapi.zip"
+          $_.name -match "^[Ff]akenvapi.*\.(zip|7z)$" -and
+          $_.name -notlike "*source*"
         } | Select-Object -First 1
         
         if (-not $asset) {
-            Write-Error "Could not find fakenvapi.zip in the latest release"
+            Write-Error "Could not find fakenvapi archive (zip or 7z) in the latest release"
             exit 1
         }
         
@@ -213,12 +214,28 @@ jobs:
         
         # Download the asset
         $downloadUrl = $asset.browser_download_url
-        $zipPath = "${{ github.workspace }}\fakenvapi.zip"
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        $archivePath = "${{ github.workspace }}\$($asset.name)"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
         
-        # Extract the ZIP file
+        # Extract the archive (handle both ZIP and 7Z)
         $extractPath = "${{ github.workspace }}\fakenvapi-temp"
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        New-Item -ItemType Directory -Force -Path $extractPath
+        
+        $extension = [System.IO.Path]::GetExtension($asset.name).ToLower()
+        if ($extension -eq ".7z") {
+            # Use 7zip to extract 7z files
+            try {
+                & 7z x -o"$extractPath" $archivePath
+                Write-Output "Successfully extracted 7z file using 7zip"
+            } catch {
+                Write-Error "Failed to extract 7z file: $($_.Exception.Message)"
+                exit 1
+            }
+        } else {
+            # Use built-in PowerShell for ZIP files
+            Expand-Archive -Path $archivePath -DestinationPath $extractPath -Force
+            Write-Output "Successfully extracted zip file"
+        }
         
         # Find the required files in the extracted directory
         $nvapi64Path = Get-ChildItem -Path $extractPath -Recurse -Filter "nvapi64.dll" | Select-Object -First 1 -ExpandProperty FullName
