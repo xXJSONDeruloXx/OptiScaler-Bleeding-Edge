@@ -151,8 +151,14 @@ jobs:
       id: dlssg_download
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest"
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest" -Headers $headers
         
         # Find the standard ZIP asset (not Universal or DLSSTweaks.Edition)
         $asset = $releases.assets | Where-Object { 
@@ -196,16 +202,23 @@ jobs:
       id: fakenvapi_download
       shell: powershell
       run: |
-        # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
         
-        # Find the fakenvapi.zip asset
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest" -Headers $headers
+        
+        # Find the fakenvapi asset with flexible naming (zip or 7z)
         $asset = $releases.assets | Where-Object { 
-          $_.name -eq "fakenvapi.zip"
+          $_.name -match "^[Ff]akenvapi.*\.(zip|7z)$" -and
+          $_.name -notlike "*source*"
         } | Select-Object -First 1
         
         if (-not $asset) {
-            Write-Error "Could not find fakenvapi.zip in the latest release"
+            Write-Error "Could not find fakenvapi archive (zip or 7z) in the latest release"
             exit 1
         }
         
@@ -213,12 +226,28 @@ jobs:
         
         # Download the asset
         $downloadUrl = $asset.browser_download_url
-        $zipPath = "${{ github.workspace }}\fakenvapi.zip"
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        $archivePath = "${{ github.workspace }}\$($asset.name)"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
         
-        # Extract the ZIP file
+        # Extract the archive (handle both ZIP and 7Z)
         $extractPath = "${{ github.workspace }}\fakenvapi-temp"
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        New-Item -ItemType Directory -Force -Path $extractPath
+        
+        $extension = [System.IO.Path]::GetExtension($asset.name).ToLower()
+        if ($extension -eq ".7z") {
+            # Use 7zip to extract 7z files
+            try {
+                & 7z x -o"$extractPath" $archivePath
+                Write-Output "Successfully extracted 7z file using 7zip"
+            } catch {
+                Write-Error "Failed to extract 7z file: $($_.Exception.Message)"
+                exit 1
+            }
+        } else {
+            # Use built-in PowerShell for ZIP files
+            Expand-Archive -Path $archivePath -DestinationPath $extractPath -Force
+            Write-Output "Successfully extracted zip file"
+        }
         
         # Find the required files in the extracted directory
         $nvapi64Path = Get-ChildItem -Path $extractPath -Recurse -Filter "nvapi64.dll" | Select-Object -First 1 -ExpandProperty FullName
@@ -246,10 +275,9 @@ jobs:
       id: fsr4_download
       shell: powershell
       run: |
-        # Hardcoded download URL for FSR4 DLL
-        $downloadUrl = "https://download.amd.com/dir/bin/amdxcffx64.dll/67D435F7d97000/amdxcffx64.dll"
-        $filename = [System.IO.Path]::GetFileName($downloadUrl)
-        $filePath = "${{ github.workspace }}\$filename"
+        # Direct download URL for FSR4 DLL
+        $downloadUrl = "https://download.amd.com/dir/bin/amdxcffx64.dll/67A4D2BC10ad000/amdxcffx64.dll"
+        $dllPath = "${{ github.workspace }}\amdxcffx64.dll"
         
         Write-Output "Downloading FSR4 DLL from: $downloadUrl"
         
@@ -260,40 +288,13 @@ jobs:
         }
         
         try {
-          # Download the file
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $filePath -Headers $headers
-          Write-Output "Successfully downloaded: $filename"
-          
-          # Check if it's an executable and extract if needed
-          $extension = [System.IO.Path]::GetExtension($filename).ToLower()
-          $dllPath = "${{ github.workspace }}\amdxcffx64.dll"
-          
-          if ($extension -eq ".exe") {
-            Write-Output "Extracting amdxcffx64.dll from executable..."
-            
-            # Use 7zip to extract (if available), otherwise try expand-archive
-            try {
-              & 7z e -r $filePath "amdxcffx64.dll" -o"${{ github.workspace }}"
-              Write-Output "Extracted using 7zip"
-            } catch {
-              Write-Output "7zip not available, attempting alternative extraction..."
-              # For .exe files, we might need to use a different approach
-              # For now, assume the downloaded file is the DLL itself
-              Copy-Item -Path $filePath -Destination $dllPath
-            }
-          } else {
-            # If it's already a DLL, check if we need to rename it
-            if ($filePath -ne $dllPath) {
-              Copy-Item -Path $filePath -Destination $dllPath
-              Write-Output "File is already a DLL, copied to standard location"
-            } else {
-              Write-Output "File is already a DLL at the correct location"
-            }
-          }
+          # Download the DLL directly
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $dllPath -Headers $headers
+          Write-Output "Successfully downloaded amdxcffx64.dll"
           
           # Verify the DLL exists
           if (-not (Test-Path $dllPath)) {
-            Write-Error "amdxcffx64.dll not found after download/extraction"
+            Write-Error "amdxcffx64.dll not found after download"
             exit 1
           }
           
@@ -306,12 +307,12 @@ jobs:
           Write-Output "Successfully copied amdxcffx64.dll to artifact directory"
           
           # Store version info (using current date as fallback)
-          $productVersion = "manual-tag-$(Get-Date -Format 'yyyyMMdd')"
+          $productVersion = "direct-dl-$(Get-Date -Format 'yyyyMMdd')"
           echo "fsr4_version=$productVersion" >> $env:GITHUB_OUTPUT
           echo "fsr4_hash=$($hash.Hash)" >> $env:GITHUB_OUTPUT
           
         } catch {
-          Write-Error "Failed to download or process FSR4 DLL: $($_.Exception.Message)"
+          Write-Error "Failed to download FSR4 DLL: $($_.Exception.Message)"
           exit 1
         }
       continue-on-error: false
@@ -321,8 +322,14 @@ jobs:
       id: streamline_download
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest" -Headers $headers
         
         # Find the streamline-sdk zip asset
         $asset = $releases.assets | Where-Object { 
@@ -512,16 +519,22 @@ jobs:
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get dlssg-to-fsr3 version
-        $dlssgRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest"
+        $dlssgRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest" -Headers $headers
         $dlssgVersion = $dlssgRelease.tag_name
         
         # Get fakenvapi version
-        $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
+        $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest" -Headers $headers
         $fakenvApiVersion = $fakenvApiRelease.tag_name
         
         # Get Streamline SDK version
-        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
+        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest" -Headers $headers
         $streamlineVersion = $streamlineRelease.tag_name
         
         # FSR4 version is already set from the download step
