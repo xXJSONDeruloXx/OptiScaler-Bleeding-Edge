@@ -151,8 +151,14 @@ jobs:
       id: dlssg_download
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest"
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest" -Headers $headers
         
         # Find the standard ZIP asset (not Universal or DLSSTweaks.Edition)
         $asset = $releases.assets | Where-Object { 
@@ -196,8 +202,14 @@ jobs:
       id: fakenvapi_download
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest" -Headers $headers
         
         # Find the fakenvapi asset with flexible naming (zip or 7z)
         $asset = $releases.assets | Where-Object { 
@@ -310,8 +322,14 @@ jobs:
       id: streamline_download
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get the latest release info from the API
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest" -Headers $headers
         
         # Find the streamline-sdk zip asset
         $asset = $releases.assets | Where-Object { 
@@ -501,16 +519,22 @@ jobs:
       if: steps.check_builds.outputs.has_new_build == 'true'
       shell: powershell
       run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
         # Get dlssg-to-fsr3 version
-        $dlssgRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest"
+        $dlssgRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest" -Headers $headers
         $dlssgVersion = $dlssgRelease.tag_name
         
         # Get fakenvapi version
-        $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest"
+        $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest" -Headers $headers
         $fakenvApiVersion = $fakenvApiRelease.tag_name
         
         # Get Streamline SDK version
-        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest"
+        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest" -Headers $headers
         $streamlineVersion = $streamlineRelease.tag_name
         
         # FSR4 version is already set from the download step
