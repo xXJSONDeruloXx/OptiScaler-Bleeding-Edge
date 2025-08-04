@@ -1,0 +1,695 @@
+name: Create Release Bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  create-bundle:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Get latest OptiScaler release
+      id: get_optiscaler
+      shell: powershell
+      run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        # Get all releases (including pre-releases) from OptiScaler repository
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/releases" -Headers $headers
+        
+        if ($releases.Count -eq 0) {
+            Write-Error "No releases found in OptiScaler repository"
+            exit 1
+        }
+        
+        # Find the most recent release (first in the list, which includes pre-releases)
+        $latestRelease = $releases[0]
+        $releaseTag = $latestRelease.tag_name
+        $releaseName = $latestRelease.name
+        $releaseDate = $latestRelease.published_at
+        $isPrerelease = $latestRelease.prerelease
+        
+        Write-Output "Found latest release: $releaseName (Tag: $releaseTag)"
+        Write-Output "Published: $releaseDate"
+        Write-Output "Is Pre-release: $isPrerelease"
+        
+        # Find 7z assets in the release
+        $assets7z = $latestRelease.assets | Where-Object { $_.name -like "*.7z" }
+        
+        if ($assets7z.Count -eq 0) {
+            Write-Error "No 7z files found in the latest release"
+            exit 1
+        }
+        
+        Write-Output "Found $($assets7z.Count) 7z file(s):"
+        foreach ($asset in $assets7z) {
+            Write-Output "  - $($asset.name) ($($asset.size) bytes)"
+        }
+        
+        # Use the first 7z file (typically the main/newest one)
+        $mainAsset = $assets7z[0]
+        
+        # Create unique bundle name with timestamp
+        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $bundleName = "BUNDLE_$($mainAsset.name.Replace('.7z', ''))-${timestamp}"
+        
+        Write-Output "Selected asset: $($mainAsset.name)"
+        Write-Output "Bundle name will be: $bundleName"
+        
+        # Store release information
+        echo "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+        echo "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+        echo "release_date=$releaseDate" >> $env:GITHUB_OUTPUT
+        echo "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
+        echo "asset_name=$($mainAsset.name)" >> $env:GITHUB_OUTPUT
+        echo "asset_url=$($mainAsset.browser_download_url)" >> $env:GITHUB_OUTPUT
+        echo "asset_size=$($mainAsset.size)" >> $env:GITHUB_OUTPUT
+        echo "bundle_name=$bundleName" >> $env:GITHUB_OUTPUT
+
+    - name: Download OptiScaler release
+      id: download_optiscaler
+      shell: powershell
+      run: |
+        $downloadUrl = "${{ steps.get_optiscaler.outputs.asset_url }}"
+        $assetName = "${{ steps.get_optiscaler.outputs.asset_name }}"
+        
+        Write-Output "Downloading OptiScaler release: $assetName"
+        Write-Output "From URL: $downloadUrl"
+        
+        # Create the main extraction directory
+        $extractPath = "${{ github.workspace }}\x64\Release\a"
+        New-Item -ItemType Directory -Force -Path $extractPath
+        
+        # Download the 7z file
+        $downloadPath = "${{ github.workspace }}\$assetName"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath
+        
+        Write-Output "Successfully downloaded: $assetName"
+        Write-Output "File size: $((Get-Item $downloadPath).Length) bytes"
+        
+        # Copy the 7z file to the artifact directory for individual download
+        Copy-Item -Path $downloadPath -Destination $extractPath
+        
+        Write-Output "OptiScaler release downloaded and staged"
+
+    - name: Download latest dlssg-to-fsr3 release
+      id: dlssg_download
+      shell: powershell
+      run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest" -Headers $headers
+        
+        # Find the standard ZIP asset (not Universal or DLSSTweaks.Edition)
+        $asset = $releases.assets | Where-Object { 
+          $_.name -like "dlssg-to-fsr3-*.zip" -and 
+          $_.name -notlike "*Universal*" -and 
+          $_.name -notlike "*DLSSTweaks.Edition*" 
+        } | Select-Object -First 1
+        
+        if (-not $asset) {
+            Write-Error "Could not find appropriate dlssg-to-fsr3 release asset"
+            exit 1
+        }
+        
+        Write-Output "Downloading $($asset.name)..."
+        
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        $zipPath = "${{ github.workspace }}\dlssg-to-fsr3.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        
+        # Extract the ZIP file
+        $extractPath = "${{ github.workspace }}\dlssg-temp"
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        
+        # Find the DLL file in the extracted directory
+        $dllPath = Get-ChildItem -Path $extractPath -Recurse -Filter "dlssg_to_fsr3_amd_is_better.dll" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $dllPath) {
+            Write-Error "Could not find dlssg_to_fsr3_amd_is_better.dll in the extracted files"
+            exit 1
+        }
+        
+        # Copy the DLL to the artifact directory
+        Copy-Item -Path $dllPath -Destination "${{ github.workspace }}\x64\Release\a\"
+        
+        Write-Output "Successfully copied dlssg_to_fsr3_amd_is_better.dll to artifact directory"
+      continue-on-error: false
+    
+    - name: Download latest fakenvapi release
+      id: fakenvapi_download
+      shell: powershell
+      run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest" -Headers $headers
+        
+        # Find the fakenvapi asset with flexible naming (zip or 7z)
+        $asset = $releases.assets | Where-Object { 
+          $_.name -match "^[Ff]akenvapi.*\.(zip|7z)$" -and
+          $_.name -notlike "*source*"
+        } | Select-Object -First 1
+        
+        if (-not $asset) {
+            Write-Error "Could not find fakenvapi archive (zip or 7z) in the latest release"
+            exit 1
+        }
+        
+        Write-Output "Downloading $($asset.name)..."
+        
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        $archivePath = "${{ github.workspace }}\$($asset.name)"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+        
+        # Extract the archive (handle both ZIP and 7Z)
+        $extractPath = "${{ github.workspace }}\fakenvapi-temp"
+        New-Item -ItemType Directory -Force -Path $extractPath
+        
+        $extension = [System.IO.Path]::GetExtension($asset.name).ToLower()
+        if ($extension -eq ".7z") {
+            # Use 7zip to extract 7z files
+            try {
+                & 7z x -o"$extractPath" $archivePath
+                Write-Output "Successfully extracted 7z file using 7zip"
+            } catch {
+                Write-Error "Failed to extract 7z file: $($_.Exception.Message)"
+                exit 1
+            }
+        } else {
+            # Use built-in PowerShell for ZIP files
+            Expand-Archive -Path $archivePath -DestinationPath $extractPath -Force
+            Write-Output "Successfully extracted zip file"
+        }
+        
+        # Find the required files in the extracted directory
+        $nvapi64Path = Get-ChildItem -Path $extractPath -Recurse -Filter "nvapi64.dll" | Select-Object -First 1 -ExpandProperty FullName
+        $fakenvApiIniPath = Get-ChildItem -Path $extractPath -Recurse -Filter "fakenvapi.ini" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $nvapi64Path) {
+            Write-Error "Could not find nvapi64.dll in the extracted files"
+            exit 1
+        }
+        
+        if (-not $fakenvApiIniPath) {
+            Write-Error "Could not find fakenvapi.ini in the extracted files"
+            exit 1
+        }
+        
+        # Copy the files to the artifact directory
+        Copy-Item -Path $nvapi64Path -Destination "${{ github.workspace }}\x64\Release\a\"
+        Copy-Item -Path $fakenvApiIniPath -Destination "${{ github.workspace }}\x64\Release\a\"
+        
+        Write-Output "Successfully copied nvapi64.dll and fakenvapi.ini to artifact directory"
+      continue-on-error: false
+
+    - name: Download FSR4 DLL
+      id: fsr4_download
+      shell: powershell
+      run: |
+        # Direct download URL for FSR4 DLL
+        $downloadUrl = "https://download.amd.com/dir/bin/amdxcffx64.dll/67A4D2BC10ad000/amdxcffx64.dll"
+        $dllPath = "${{ github.workspace }}\amdxcffx64.dll"
+        
+        Write-Output "Downloading FSR4 DLL from: $downloadUrl"
+        
+        # Set headers to mimic browser request
+        $headers = @{
+          'Referer' = 'https://www.amd.com'
+          'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        try {
+          # Download the DLL directly
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $dllPath -Headers $headers
+          Write-Output "Successfully downloaded amdxcffx64.dll"
+          
+          # Verify the DLL exists
+          if (-not (Test-Path $dllPath)) {
+            Write-Error "amdxcffx64.dll not found after download"
+            exit 1
+          }
+          
+          # Get file hash for verification
+          $hash = Get-FileHash -Path $dllPath -Algorithm SHA256
+          Write-Output "FSR4 DLL SHA256: $($hash.Hash)"
+          
+          # Copy to the artifact directory
+          Copy-Item -Path $dllPath -Destination "${{ github.workspace }}\x64\Release\a\"
+          Write-Output "Successfully copied amdxcffx64.dll to artifact directory"
+          
+          # Store version info (using current date as fallback)
+          $productVersion = "direct-dl-$(Get-Date -Format 'yyyyMMdd')"
+          echo "fsr4_version=$productVersion" >> $env:GITHUB_OUTPUT
+          echo "fsr4_hash=$($hash.Hash)" >> $env:GITHUB_OUTPUT
+          
+        } catch {
+          Write-Error "Failed to download FSR4 DLL: $($_.Exception.Message)"
+          exit 1
+        }
+      continue-on-error: false
+
+    - name: Download latest Streamline SDK
+      id: streamline_download
+      shell: powershell
+      run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        # Get the latest release info from the API
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest" -Headers $headers
+        
+        # Find the streamline-sdk zip asset
+        $asset = $releases.assets | Where-Object { 
+          $_.name -match "streamline-sdk.*\.zip" -or
+          $_.name -match "streamline-sdk-v\d+\.\d+\.\d+\.zip"
+        } | Select-Object -First 1
+        
+        if (-not $asset) {
+            Write-Error "Could not find streamline-sdk zip in the latest release"
+            exit 1
+        }
+        
+        Write-Output "Downloading $($asset.name)..."
+        
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        $zipPath = "${{ github.workspace }}\streamline-sdk.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        
+        # Extract the ZIP file
+        $extractPath = "${{ github.workspace }}\streamline-temp"
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        
+        # Find the nvngx_dlss.dll file in the extracted directory (search all possible locations)
+        $nvngxDlssPath = Get-ChildItem -Path $extractPath -Recurse -Filter "nvngx_dlss.dll" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $nvngxDlssPath) {
+            Write-Error "Could not find nvngx_dlss.dll in the extracted files"
+            exit 1
+        }
+        
+        Write-Output "Found nvngx_dlss.dll at: $nvngxDlssPath"
+        
+        # Copy the file to the artifact directory and rename it to nvngx.dll
+        Copy-Item -Path $nvngxDlssPath -Destination "${{ github.workspace }}\x64\Release\a\nvngx.dll"
+        
+        Write-Output "Successfully copied nvngx_dlss.dll to artifact directory as nvngx.dll"
+      continue-on-error: false
+
+    - name: List consolidated artifacts
+      shell: powershell
+      run: |
+        Write-Output "Contents of consolidated artifact directory:"
+        Get-ChildItem -Path "${{ github.workspace }}\x64\Release\a" -Recurse | ForEach-Object {
+            Write-Output "  $($_.Name) ($($_.Length) bytes)"
+        }
+
+    - name: Create bundled release package
+      shell: powershell
+      run: |
+        $artifactDir = "${{ github.workspace }}\x64\Release\a"
+        
+        # Find the OptiScaler 7z file
+        $optiscaler7z = Get-ChildItem -Path $artifactDir -Filter "*.7z" | Select-Object -First 1
+        
+        if (-not $optiscaler7z) {
+            Write-Error "Could not find OptiScaler 7z file in artifact directory"
+            exit 1
+        }
+        
+        Write-Output "Found OptiScaler 7z file: $($optiscaler7z.Name)"
+        
+        # Extract the 7z file contents
+        $extractPath = "${{ github.workspace }}\optiscaler-extracted"
+        New-Item -ItemType Directory -Force -Path $extractPath
+        
+        # Use 7zip to extract the OptiScaler 7z file
+        try {
+            & 7z x -o"$extractPath" $optiscaler7z.FullName
+            Write-Output "Successfully extracted OptiScaler 7z file"
+        } catch {
+            Write-Error "Failed to extract OptiScaler 7z file: $($_.Exception.Message)"
+            exit 1
+        }
+        
+        # Create bundled directory
+        $bundledPath = "${{ github.workspace }}\bundled"
+        New-Item -ItemType Directory -Force -Path $bundledPath
+        
+        # Copy all extracted OptiScaler files to bundled directory
+        Copy-Item -Path "$extractPath\*" -Destination $bundledPath -Recurse -Force
+        Write-Output "Copied OptiScaler files to bundled directory"
+        
+        # Get all additional files (excluding the 7z file and any duplicate OptiScaler.dll)
+        $additionalFiles = Get-ChildItem -Path $artifactDir -File | Where-Object { 
+            $_.Extension -ne ".7z" -and 
+            -not ($_.Name -eq "OptiScaler.dll" -and (Test-Path "$bundledPath\OptiScaler.dll"))
+        }
+        
+        # Copy additional files to bundled directory
+        foreach ($file in $additionalFiles) {
+            Copy-Item -Path $file.FullName -Destination $bundledPath -Force
+            Write-Output "Added to bundle: $($file.Name)"
+        }
+        
+        # Create the bundled 7z file using the bundle name from earlier
+        $bundledName = "${{ steps.get_optiscaler.outputs.bundle_name }}"
+        $bundled7zPath = "${{ github.workspace }}\$bundledName.7z"
+        
+        try {
+            & 7z a -t7z -mx=9 $bundled7zPath "$bundledPath\*"
+            Write-Output "Successfully created bundled 7z: $bundledName.7z"
+        } catch {
+            Write-Error "Failed to create bundled 7z file: $($_.Exception.Message)"
+            exit 1
+        }
+        
+        # List contents of bundled directory for verification
+        Write-Output "Contents of bundled package:"
+        Get-ChildItem -Path $bundledPath -Recurse | ForEach-Object {
+            $relativePath = $_.FullName.Replace($bundledPath, "").TrimStart('\')
+            if ($_.PSIsContainer) {
+                Write-Output "  [DIR] $relativePath/"
+            } else {
+                Write-Output "  [FILE] $relativePath ($($_.Length) bytes)"
+            }
+        }
+        
+        # Calculate hash for bundled 7z
+        $bundledHash = Get-FileHash -Path $bundled7zPath -Algorithm SHA256
+        
+        # Store bundled file info
+        echo "bundled_7z_path=$bundled7zPath" >> $env:GITHUB_OUTPUT
+        echo "bundled_7z_name=$bundledName.7z" >> $env:GITHUB_OUTPUT
+        echo "bundled_7z_hash=$($bundledHash.Hash.ToLower())" >> $env:GITHUB_OUTPUT
+        echo "bundled_7z_size=$((Get-Item $bundled7zPath).Length)" >> $env:GITHUB_OUTPUT
+      id: create_bundle
+
+    - name: Create consolidated release package
+      shell: powershell
+      run: |
+        # Get list of all files in the artifact directory for individual upload
+        $artifactDir = "${{ github.workspace }}\x64\Release\a"
+        $files = Get-ChildItem -Path $artifactDir -File
+        
+        $fileList = @()
+        $fileDetails = @()
+        foreach ($file in $files) {
+            # Calculate SHA256 hash for each file
+            $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256
+            
+            $fileList += @{
+                "path" = $file.FullName
+                "name" = $file.Name
+            }
+            
+            $fileDetails += @{
+                "name" = $file.Name
+                "sha256hash" = $hash.Hash.ToLower()
+                "size" = $file.Length
+            }
+            
+            Write-Output "Will upload: $($file.Name) ($($file.Length) bytes) - SHA256: $($hash.Hash)"
+        }
+        
+        # Add the bundled 7z file to the upload list
+        $bundled7zPath = "${{ steps.create_bundle.outputs.bundled_7z_path }}"
+        $bundled7zName = "${{ steps.create_bundle.outputs.bundled_7z_name }}"
+        $bundled7zHash = "${{ steps.create_bundle.outputs.bundled_7z_hash }}"
+        $bundled7zSize = "${{ steps.create_bundle.outputs.bundled_7z_size }}"
+        
+        $fileList += @{
+            "path" = $bundled7zPath
+            "name" = $bundled7zName
+        }
+        
+        $fileDetails += @{
+            "name" = $bundled7zName
+            "sha256hash" = $bundled7zHash
+            "size" = [int]$bundled7zSize
+        }
+        
+        Write-Output "Will upload bundled: $bundled7zName ($bundled7zSize bytes) - SHA256: $bundled7zHash"
+        
+        # Convert to JSON for passing to upload steps
+        $filesJson = $fileList | ConvertTo-Json -Compress
+        $fileDetailsJson = $fileDetails | ConvertTo-Json -Compress
+        echo "files_to_upload=$filesJson" >> $env:GITHUB_OUTPUT
+        echo "files_count=$($fileList.Count)" >> $env:GITHUB_OUTPUT
+        echo "file_details=$fileDetailsJson" >> $env:GITHUB_OUTPUT
+      id: prepare_assets
+
+    - name: Get component versions
+      shell: powershell
+      run: |
+        # Set up headers for authenticated API requests
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        # Get dlssg-to-fsr3 version
+        $dlssgRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/xXJSONDeruloXx/dlssg-to-fsr3/releases/latest" -Headers $headers
+        $dlssgVersion = $dlssgRelease.tag_name
+        
+        # Get fakenvapi version
+        $fakenvApiRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/FakeMichau/fakenvapi/releases/latest" -Headers $headers
+        $fakenvApiVersion = $fakenvApiRelease.tag_name
+        
+        # Get Streamline SDK version
+        $streamlineRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases/latest" -Headers $headers
+        $streamlineVersion = $streamlineRelease.tag_name
+        
+        # FSR4 version is already set from the download step
+        $fsr4Version = "${{ steps.fsr4_download.outputs.fsr4_version }}"
+        $fsr4Hash = "${{ steps.fsr4_download.outputs.fsr4_hash }}"
+        
+        # OptiScaler info from earlier step
+        $optiscalerVersion = "${{ steps.get_optiscaler.outputs.release_tag }}"
+        $optiscalerName = "${{ steps.get_optiscaler.outputs.release_name }}"
+        $optiscalerDate = "${{ steps.get_optiscaler.outputs.release_date }}"
+        $isPrerelease = "${{ steps.get_optiscaler.outputs.is_prerelease }}"
+        
+        echo "dlssg_version=$dlssgVersion" >> $env:GITHUB_OUTPUT
+        echo "fakenvapi_version=$fakenvApiVersion" >> $env:GITHUB_OUTPUT
+        echo "streamline_version=$streamlineVersion" >> $env:GITHUB_OUTPUT
+        echo "fsr4_version=$fsr4Version" >> $env:GITHUB_OUTPUT
+        echo "fsr4_hash=$fsr4Hash" >> $env:GITHUB_OUTPUT
+        echo "optiscaler_version=$optiscalerVersion" >> $env:GITHUB_OUTPUT
+        echo "optiscaler_name=$optiscalerName" >> $env:GITHUB_OUTPUT
+        echo "optiscaler_date=$optiscalerDate" >> $env:GITHUB_OUTPUT
+        echo "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
+        
+        Write-Output "Component versions:"
+        Write-Output "  OptiScaler: $optiscalerName ($optiscalerVersion) - Pre-release: $isPrerelease"
+        Write-Output "  dlssg-to-fsr3: $dlssgVersion"
+        Write-Output "  fakenvapi: $fakenvApiVersion"
+        Write-Output "  Streamline SDK: $streamlineVersion"
+        Write-Output "  FSR4 DLL: $fsr4Version"
+        Write-Output "  FSR4 Hash: $fsr4Hash"
+      id: get_versions
+
+    - name: Format file details for release
+      shell: powershell
+      run: |
+        # Parse the file details from JSON
+        $fileDetails = '${{ steps.prepare_assets.outputs.file_details }}' | ConvertFrom-Json
+        
+        # Format as JSON array for release notes
+        $formattedDetails = @()
+        foreach ($file in $fileDetails) {
+            # We'll add the download URL after the release is created
+            $formattedDetails += @{
+                "name" = $file.name
+                "sha256hash" = $file.sha256hash
+                "size" = $file.size
+            }
+        }
+        
+        # Convert to nicely formatted JSON
+        $jsonOutput = $formattedDetails | ConvertTo-Json -Depth 3
+        
+        # Store the formatted JSON for use in release notes
+        echo "formatted_file_details<<EOF" >> $env:GITHUB_OUTPUT
+        echo $jsonOutput >> $env:GITHUB_OUTPUT
+        echo "EOF" >> $env:GITHUB_OUTPUT
+      id: format_file_details
+
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.get_optiscaler.outputs.bundle_name }}
+        release_name: ${{ steps.get_optiscaler.outputs.bundle_name }} - Release Bundle
+        body: |
+          🚀 **Manual Release Bundle**
+          
+          This bundle contains the latest OptiScaler release combined with the latest versions of complementary tools.
+          
+          ## 📦 Components Included
+          
+          - **OptiScaler**: ${{ steps.get_versions.outputs.optiscaler_name }} (Tag: `${{ steps.get_versions.outputs.optiscaler_version }}`)${{ steps.get_versions.outputs.is_prerelease == 'true' && ' - **Pre-release**' || '' }}
+            - Release Date: ${{ steps.get_versions.outputs.optiscaler_date }}
+            - Original Release: [View on GitHub](https://github.com/optiscaler/OptiScaler/releases/tag/${{ steps.get_versions.outputs.optiscaler_version }})
+          - **dlssg-to-fsr3**: ${{ steps.get_versions.outputs.dlssg_version }} - `dlssg_to_fsr3_amd_is_better.dll`
+          - **fakenvapi**: ${{ steps.get_versions.outputs.fakenvapi_version }} - `nvapi64.dll` and `fakenvapi.ini`
+          - **Streamline SDK**: ${{ steps.get_versions.outputs.streamline_version }} - `nvngx.dll` (renamed from `nvngx_dlss.dll`)
+          - **FSR4 DLL**: ${{ steps.get_versions.outputs.fsr4_version }} - `amdxcffx64.dll`
+          
+          ## 🎁 Download Options
+          
+          - **📦 Bundled Package**: `${{ steps.create_bundle.outputs.bundled_7z_name }}` - Contains all components in one convenient package
+          - **📁 Individual Files**: Download specific components separately from the assets below
+          - **📄 Original OptiScaler Package**: The original 7z file from the OptiScaler repository
+          
+          ## ⚠️ Important Notes
+          
+          - This bundle is based on the **most recent OptiScaler release** (including pre-releases)${{ steps.get_versions.outputs.is_prerelease == 'true' && ', which is currently a **pre-release**' || '' }}
+          ${{ steps.get_versions.outputs.is_prerelease == 'true' && '- Pre-release builds may contain experimental features or bugs' || '- This uses a stable OptiScaler release' }}
+          - Use at your own risk in production environments
+          - For official releases, visit the [OptiScaler releases page](https://github.com/optiscaler/OptiScaler/releases)
+          
+          ## 🔧 Installation
+          
+          1. **Option A (Recommended)**: Download the bundled package `${{ steps.create_bundle.outputs.bundled_7z_name }}` and extract all files to your game directory
+          2. **Option B**: Download individual files below or use the release assets
+          3. Follow the OptiScaler documentation for configuration
+          
+          ## 📋 Release Artifacts Details
+          
+          ```json
+          ${{ steps.format_file_details.outputs.formatted_file_details }}
+          ```
+          
+          ## 🔍 Quick Verification
+          
+          **FSR4 DLL Hash (SHA256):** `${{ steps.get_versions.outputs.fsr4_hash }}`
+          **Bundled Package Hash (SHA256):** `${{ steps.create_bundle.outputs.bundled_7z_hash }}`
+          
+          ---
+          
+          **Build Information:**
+          - OptiScaler Release: `${{ steps.get_versions.outputs.optiscaler_version }}` (${{ steps.get_versions.outputs.is_prerelease == 'true' && 'Pre-release' || 'Stable' }})
+          - OptiScaler Asset: `${{ steps.get_optiscaler.outputs.asset_name }}`
+          - Bundle Tag: `${{ steps.get_optiscaler.outputs.bundle_name }}`
+          - Trigger: Manual (workflow_dispatch)
+          - Workflow Run: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        draft: false
+        prerelease: false
+      id: create_release
+
+    - name: Upload Release Assets
+      shell: powershell
+      run: |
+        # Parse the files list and upload each one individually
+        $files = '${{ steps.prepare_assets.outputs.files_to_upload }}' | ConvertFrom-Json
+        $uploadUrl = "${{ steps.create_release.outputs.upload_url }}"
+        
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        
+        foreach ($file in $files) {
+            $filePath = $file.path
+            $fileName = $file.name
+            
+            Write-Output "Uploading: $fileName"
+            
+            # Determine content type based on file extension
+            $contentType = switch -Regex ($fileName) {
+                '\.dll$' { 'application/octet-stream' }
+                '\.7z$' { 'application/x-7z-compressed' }
+                '\.ini$' { 'text/plain' }
+                default { 'application/octet-stream' }
+            }
+            
+            # Upload URL format: {upload_url}?name={name}&label={label}
+            $cleanUploadUrl = $uploadUrl -replace '\{.*\}', ''
+            $fullUploadUrl = "${cleanUploadUrl}?name=${fileName}"
+            
+            try {
+                # Read file content
+                $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+                
+                # Upload the file
+                $response = Invoke-RestMethod -Uri $fullUploadUrl -Method POST -Headers $headers -Body $fileBytes -ContentType $contentType
+                Write-Output "✅ Successfully uploaded: $fileName"
+            } catch {
+                Write-Error "❌ Failed to upload $fileName : $($_.Exception.Message)"
+                exit 1
+            }
+        }
+        
+        Write-Output "🎉 All files uploaded successfully!"
+
+    - name: Update repository description
+      shell: powershell
+      run: |
+        $headers = @{
+          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
+          'Accept' = 'application/vnd.github.v3+json'
+          'Content-Type' = 'application/json'
+        }
+        
+        $body = @{
+          description = "🚀 Automated bleeding-edge releases for OptiScaler | Latest Bundle: ${{ steps.get_optiscaler.outputs.bundle_name }}"
+        } | ConvertTo-Json
+        
+        try {
+          Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}" -Method PATCH -Headers $headers -Body $body
+          Write-Output "Updated repository description"
+        } catch {
+          Write-Output "Failed to update repository description: $($_.Exception.Message)"
+        }
+
+    - name: Cleanup temporary files
+      if: always()
+      shell: powershell
+      run: |
+        # Clean up temporary directories and files
+        $tempPaths = @(
+          "${{ github.workspace }}\dlssg-temp",
+          "${{ github.workspace }}\fakenvapi-temp", 
+          "${{ github.workspace }}\streamline-temp",
+          "${{ github.workspace }}\optiscaler-extracted",
+          "${{ github.workspace }}\bundled",
+          "${{ github.workspace }}\*.exe",
+          "${{ github.workspace }}\amdxcffx64.dll",
+          "${{ github.workspace }}\*.zip",
+          "${{ github.workspace }}\BUNDLE_*.7z"
+        )
+        
+        foreach ($path in $tempPaths) {
+          if (Test-Path $path) {
+            Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Cleaned up: $path"
+          }
+        }
