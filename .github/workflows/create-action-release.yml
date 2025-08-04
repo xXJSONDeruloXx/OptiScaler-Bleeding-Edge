@@ -1,4 +1,4 @@
-name: Create Bleeding Edge Release
+name: Create Action Release
 
 on:
   schedule:
