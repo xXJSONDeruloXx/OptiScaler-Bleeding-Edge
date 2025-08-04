@@ -33,32 +33,46 @@ jobs:
             exit 1
         }
         
-        # Find the most recent release (first in the list, which includes pre-releases)
-        $latestRelease = $releases[0]
-        $releaseTag = $latestRelease.tag_name
-        $releaseName = $latestRelease.name
-        $releaseDate = $latestRelease.published_at
-        $isPrerelease = $latestRelease.prerelease
+        Write-Output "Searching across $($releases.Count) releases for the most recent 7z asset..."
         
-        Write-Output "Found latest release: $releaseName (Tag: $releaseTag)"
-        Write-Output "Published: $releaseDate"
-        Write-Output "Is Pre-release: $isPrerelease"
+        # Collect all 7z assets from all releases with their metadata
+        $allAssets = @()
+        foreach ($release in $releases) {
+            $assets7z = $release.assets | Where-Object { $_.name -like "*.7z" }
+            foreach ($asset in $assets7z) {
+                $allAssets += @{
+                    "asset" = $asset
+                    "release_tag" = $release.tag_name
+                    "release_name" = $release.name
+                    "release_date" = $release.published_at
+                    "is_prerelease" = $release.prerelease
+                    "asset_created" = $asset.created_at
+                    "asset_updated" = $asset.updated_at
+                }
+                Write-Output "Found 7z: $($asset.name) in release $($release.tag_name) (Created: $($asset.created_at))"
+            }
+        }
         
-        # Find 7z assets in the release
-        $assets7z = $latestRelease.assets | Where-Object { $_.name -like "*.7z" }
-        
-        if ($assets7z.Count -eq 0) {
-            Write-Error "No 7z files found in the latest release"
+        if ($allAssets.Count -eq 0) {
+            Write-Error "No 7z files found in any release"
             exit 1
         }
         
-        Write-Output "Found $($assets7z.Count) 7z file(s):"
-        foreach ($asset in $assets7z) {
-            Write-Output "  - $($asset.name) ($($asset.size) bytes)"
-        }
+        # Sort by asset creation date (most recent first) to find the absolute latest 7z asset
+        $sortedAssets = $allAssets | Sort-Object { [DateTime]$_.asset_created } -Descending
+        $latestAssetInfo = $sortedAssets[0]
         
-        # Use the first 7z file (typically the main/newest one)
-        $mainAsset = $assets7z[0]
+        $mainAsset = $latestAssetInfo.asset
+        $releaseTag = $latestAssetInfo.release_tag
+        $releaseName = $latestAssetInfo.release_name
+        $releaseDate = $latestAssetInfo.release_date
+        $isPrerelease = $latestAssetInfo.is_prerelease
+        
+        Write-Output "Selected most recent 7z asset:"
+        Write-Output "  Asset: $($mainAsset.name) (Created: $($mainAsset.created_at))"
+        Write-Output "  From Release: $releaseName (Tag: $releaseTag)"
+        Write-Output "  Release Date: $releaseDate"
+        Write-Output "  Is Pre-release: $isPrerelease"
         
         # Create unique bundle name with timestamp
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
