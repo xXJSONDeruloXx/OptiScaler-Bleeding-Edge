@@ -535,13 +535,20 @@ jobs:
         # Parse the file details from JSON
         $fileDetails = '${{ steps.prepare_assets.outputs.file_details }}' | ConvertFrom-Json
         
-        # Format as JSON array for release notes
+        # Get the release tag for URL construction
+        $releaseTag = "${{ steps.get_optiscaler.outputs.bundle_name }}"
+        $repoName = "${{ github.repository }}"
+        
+        # Format as JSON array for release notes with download URLs
         $formattedDetails = @()
         foreach ($file in $fileDetails) {
-            # We'll add the download URL after the release is created
+            # Construct the download URL
+            $downloadUrl = "https://github.com/${repoName}/releases/download/${releaseTag}/$($file.name)"
+            
             $formattedDetails += @{
-                "name" = $file.name
                 "sha256hash" = $file.sha256hash
+                "name" = $file.name
+                "url" = $downloadUrl
                 "size" = $file.size
             }
         }
@@ -563,11 +570,11 @@ jobs:
         tag_name: ${{ steps.get_optiscaler.outputs.bundle_name }}
         release_name: ${{ steps.get_optiscaler.outputs.bundle_name }} - Release Bundle
         body: |
-          🚀 **Manual Release Bundle**
+          **Manual Release Bundle**
           
           This bundle contains the latest OptiScaler release combined with the latest versions of complementary tools.
           
-          ## 📦 Components Included
+          ## Components Included
           
           - **OptiScaler**: ${{ steps.get_versions.outputs.optiscaler_name }} (Tag: `${{ steps.get_versions.outputs.optiscaler_version }}`)${{ steps.get_versions.outputs.is_prerelease == 'true' && ' - **Pre-release**' || '' }}
             - Release Date: ${{ steps.get_versions.outputs.optiscaler_date }}
@@ -577,36 +584,18 @@ jobs:
           - **Streamline SDK**: ${{ steps.get_versions.outputs.streamline_version }} - `nvngx.dll` (renamed from `nvngx_dlss.dll`)
           - **FSR4 DLL**: ${{ steps.get_versions.outputs.fsr4_version }} - `amdxcffx64.dll`
           
-          ## 🎁 Download Options
-          
-          - **📦 Bundled Package**: `${{ steps.create_bundle.outputs.bundled_7z_name }}` - Contains all components in one convenient package
-          - **📁 Individual Files**: Download specific components separately from the assets below
-          - **📄 Original OptiScaler Package**: The original 7z file from the OptiScaler repository
-          
-          ## ⚠️ Important Notes
+          ## Important Notes
           
           - This bundle is based on the **most recent OptiScaler release** (including pre-releases)${{ steps.get_versions.outputs.is_prerelease == 'true' && ', which is currently a **pre-release**' || '' }}
           ${{ steps.get_versions.outputs.is_prerelease == 'true' && '- Pre-release builds may contain experimental features or bugs' || '- This uses a stable OptiScaler release' }}
           - Use at your own risk in production environments
           - For official releases, visit the [OptiScaler releases page](https://github.com/optiscaler/OptiScaler/releases)
           
-          ## 🔧 Installation
-          
-          1. **Option A (Recommended)**: Download the bundled package `${{ steps.create_bundle.outputs.bundled_7z_name }}` and extract all files to your game directory
-          2. **Option B**: Download individual files below or use the release assets
-          3. Follow the OptiScaler documentation for configuration
-          
-          ## 📋 Release Artifacts Details
+          ## Release Artifacts Details
           
           ```json
           ${{ steps.format_file_details.outputs.formatted_file_details }}
           ```
-          
-          ## 🔍 Quick Verification
-          
-          **FSR4 DLL Hash (SHA256):** `${{ steps.get_versions.outputs.fsr4_hash }}`
-          **Bundled Package Hash (SHA256):** `${{ steps.create_bundle.outputs.bundled_7z_hash }}`
-          
           ---
           
           **Build Information:**
