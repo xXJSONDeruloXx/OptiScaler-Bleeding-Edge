@@ -185,7 +185,7 @@ jobs:
                 
                 foreach ($dir in $altDirs) {
                     if (Test-Path $dir) {
-                        Write-Output "Contents of $dir:"
+                        Write-Output "Contents of ${dir}:"
                         Get-ChildItem -Path $dir -Recurse | ForEach-Object {
                             Write-Output "  $($_.FullName)"
                         }
