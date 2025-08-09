@@ -2,6 +2,9 @@ name: Create Latest Branch Release
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+    - nightly-action
 
 permissions:
   contents: write
@@ -128,8 +131,19 @@ jobs:
         
         # Build the solution
         try {
-            $buildResult = & msbuild upstream-optiscaler/OptiScaler.sln /p:Configuration=Release /p:Platform=x64 /m
+            Write-Output "Running MSBuild with verbose logging..."
+            $buildResult = & msbuild upstream-optiscaler/OptiScaler.sln /p:Configuration=Release /p:Platform=x64 /m /verbosity:normal /flp:logfile=build.log;verbosity=diagnostic
             $buildExitCode = $LASTEXITCODE
+            
+            Write-Output "MSBuild exit code: $buildExitCode"
+            
+            # Show the last 50 lines of the build log if it exists
+            if (Test-Path "build.log") {
+                Write-Output "Last 50 lines of build log:"
+                Get-Content "build.log" | Select-Object -Last 50 | ForEach-Object {
+                    Write-Output "BUILD LOG: $_"
+                }
+            }
             
             if ($buildExitCode -ne 0) {
                 Write-Error "❌ MSBuild failed with exit code: $buildExitCode"
@@ -138,20 +152,44 @@ jobs:
             
             Write-Output "✅ MSBuild completed successfully!"
             
+            # Debug: List all files in the upstream-optiscaler directory
+            Write-Output "Searching for build outputs..."
+            Write-Output "Contents of upstream-optiscaler directory:"
+            Get-ChildItem -Path "upstream-optiscaler" -Recurse -Include "*.dll", "*.exe", "*.lib" | ForEach-Object {
+                Write-Output "  Found: $($_.FullName)"
+            }
+            
             # Check if build outputs exist
             $dllPath = "upstream-optiscaler\x64\Release\OptiScaler.dll"
             if (-not (Test-Path $dllPath)) {
-                Write-Error "❌ OptiScaler.dll not found at expected location: $dllPath"
+                Write-Output "❌ OptiScaler.dll not found at expected location: $dllPath"
                 
                 # List what files are actually in the output directory
                 $outputDir = "upstream-optiscaler\x64\Release"
                 if (Test-Path $outputDir) {
-                    Write-Output "Files in output directory:"
+                    Write-Output "Files in x64\Release directory:"
                     Get-ChildItem -Path $outputDir -Recurse | ForEach-Object {
                         Write-Output "  $($_.FullName)"
                     }
                 } else {
-                    Write-Output "Output directory does not exist: $outputDir"
+                    Write-Output "x64\Release directory does not exist"
+                }
+                
+                # Check other possible output locations
+                $altDirs = @(
+                    "upstream-optiscaler\OptiScaler\x64\Release",
+                    "upstream-optiscaler\Release",
+                    "upstream-optiscaler\x64",
+                    "upstream-optiscaler\OptiScaler\Release"
+                )
+                
+                foreach ($dir in $altDirs) {
+                    if (Test-Path $dir) {
+                        Write-Output "Contents of $dir:"
+                        Get-ChildItem -Path $dir -Recurse | ForEach-Object {
+                            Write-Output "  $($_.FullName)"
+                        }
+                    }
                 }
                 
                 exit 1
