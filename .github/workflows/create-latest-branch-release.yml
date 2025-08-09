@@ -94,208 +94,109 @@ jobs:
         $shortSha = $latestBranch.sha.Substring(0, 8)
         echo "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
 
-    - name: Trigger upstream build workflow
-      id: trigger_build
+    - name: Checkout upstream repository
+      uses: actions/checkout@v4
+      with:
+        repository: optiscaler/OptiScaler
+        ref: ${{ steps.find_branch.outputs.branch_name }}
+        path: upstream-optiscaler
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+      
+    - name: Add msbuild to PATH
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Restore NuGet packages
+      run: nuget restore upstream-optiscaler/OptiScaler.sln
+
+    - name: Build OptiScaler
+      id: build_optiscaler
       shell: powershell
       run: |
-        # Set up headers for authenticated API requests
-        $headers = @{
-          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
-          'Accept' = 'application/vnd.github.v3+json'
-          'Content-Type' = 'application/json'
-        }
-        
         $branchName = "${{ steps.find_branch.outputs.branch_name }}"
         $commitSha = "${{ steps.find_branch.outputs.commit_sha }}"
-        
-        Write-Output "Triggering just_build_no_signature.yml workflow on branch: $branchName"
-        
-        # Trigger the workflow dispatch
-        $triggerBody = @{
-          "ref" = $branchName
-        } | ConvertTo-Json
-        
-        try {
-            $triggerResponse = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/workflows/just_build_no_signature.yml/dispatches" -Method POST -Headers $headers -Body $triggerBody
-            Write-Output "✅ Successfully triggered upstream build workflow"
-        } catch {
-            Write-Error "❌ Failed to trigger upstream build workflow: $($_.Exception.Message)"
-            Write-Error "Response: $($_.Exception.Response)"
-            exit 1
-        }
-        
-        # Wait a moment for the workflow to start
-        Start-Sleep -Seconds 10
-        
-        # Look for the triggered workflow run
-        Write-Output "Looking for the triggered workflow run..."
-        $maxAttempts = 30
-        $attempt = 0
-        $runId = $null
-        
-        while ($attempt -lt $maxAttempts -and $null -eq $runId) {
-            $attempt++
-            Write-Output "Attempt $attempt of $maxAttempts to find workflow run..."
-            
-            # Get recent workflow runs for just_build_no_signature.yml
-            $workflowRuns = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/workflows/just_build_no_signature.yml/runs?branch=$branchName&per_page=5" -Headers $headers
-            
-            # Look for a run that was started recently (within the last 5 minutes)
-            $cutoffTime = (Get-Date).AddMinutes(-5)
-            foreach ($run in $workflowRuns.workflow_runs) {
-                $runStartTime = [DateTime]$run.created_at
-                if ($runStartTime -gt $cutoffTime -and $run.head_sha -eq $commitSha) {
-                    $runId = $run.id
-                    Write-Output "✅ Found workflow run ID: $runId"
-                    Write-Output "  Status: $($run.status)"
-                    Write-Output "  Started: $($run.created_at)"
-                    break
-                }
-            }
-            
-            if ($null -eq $runId) {
-                Write-Output "Workflow run not found yet, waiting 10 seconds..."
-                Start-Sleep -Seconds 10
-            }
-        }
-        
-        if ($null -eq $runId) {
-            Write-Error "Could not find the triggered workflow run after $maxAttempts attempts"
-            exit 1
-        }
-        
-        echo "workflow_run_id=$runId" >> $env:GITHUB_OUTPUT
-
-    - name: Wait for upstream build to complete
-      id: wait_build
-      shell: powershell
-      run: |
-        $headers = @{
-          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
-          'Accept' = 'application/vnd.github.v3+json'
-        }
-        
-        $runId = "${{ steps.trigger_build.outputs.workflow_run_id }}"
-        $maxWaitMinutes = 30
-        $checkIntervalSeconds = 30
-        $maxChecks = [math]::Ceiling(($maxWaitMinutes * 60) / $checkIntervalSeconds)
-        
-        Write-Output "Waiting for workflow run $runId to complete (max $maxWaitMinutes minutes)..."
-        
-        $check = 0
-        $completed = $false
-        
-        while ($check -lt $maxChecks -and -not $completed) {
-            $check++
-            $elapsed = ($check - 1) * $checkIntervalSeconds
-            $elapsedMinutes = [math]::Floor($elapsed / 60)
-            $elapsedSeconds = $elapsed % 60
-            
-            Write-Output "Check $check of $maxChecks (${elapsedMinutes}m ${elapsedSeconds}s elapsed)..."
-            
-            try {
-                $runStatus = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/runs/$runId" -Headers $headers
-                
-                Write-Output "  Status: $($runStatus.status) | Conclusion: $($runStatus.conclusion)"
-                
-                if ($runStatus.status -eq "completed") {
-                    $completed = $true
-                    if ($runStatus.conclusion -eq "success") {
-                        Write-Output "✅ Build completed successfully!"
-                        echo "build_successful=true" >> $env:GITHUB_OUTPUT
-                    } else {
-                        Write-Error "❌ Build completed but failed with conclusion: $($runStatus.conclusion)"
-                        echo "build_successful=false" >> $env:GITHUB_OUTPUT
-                        exit 1
-                    }
-                } else {
-                    Write-Output "  Build still in progress..."
-                    Start-Sleep -Seconds $checkIntervalSeconds
-                }
-            } catch {
-                Write-Output "  Error checking build status: $($_.Exception.Message)"
-                Start-Sleep -Seconds $checkIntervalSeconds
-            }
-        }
-        
-        if (-not $completed) {
-            Write-Error "❌ Build did not complete within $maxWaitMinutes minutes"
-            exit 1
-        }
-
-    - name: Download OptiScaler build artifacts
-      id: download_artifacts
-      shell: powershell
-      run: |
-        $headers = @{
-          'Authorization' = 'Bearer ${{ secrets.GITHUB_TOKEN }}'
-          'Accept' = 'application/vnd.github.v3+json'
-        }
-        
-        $runId = "${{ steps.trigger_build.outputs.workflow_run_id }}"
-        
-        Write-Output "Downloading artifacts from workflow run: $runId"
-        
-        # Get artifacts from the successful run
-        $artifacts = Invoke-RestMethod -Uri "https://api.github.com/repos/optiscaler/OptiScaler/actions/runs/$runId/artifacts" -Headers $headers
-        
-        if ($artifacts.artifacts.Count -eq 0) {
-            Write-Error "No artifacts found for run $runId"
-            exit 1
-        }
-        
-        # Find all OptiScaler build artifacts
-        $buildArtifacts = $artifacts.artifacts | Where-Object { $_.name -like "OptiScaler_*" }
-        
-        if ($buildArtifacts.Count -eq 0) {
-            Write-Error "Could not find OptiScaler build artifacts"
-            exit 1
-        }
-        
-        Write-Output "Found $($buildArtifacts.Count) build artifacts:"
-        foreach ($artifact in $buildArtifacts) {
-            Write-Output "  - $($artifact.name) (ID: $($artifact.id))"
-        }
-        
-        # Use the first artifact name for release naming
-        $mainArtifact = $buildArtifacts[0]
-        $branchName = "${{ steps.find_branch.outputs.branch_name }}"
         $shortSha = "${{ steps.find_branch.outputs.short_sha }}"
         
-        # Create unique artifact name
-        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $baseArtifactName = $mainArtifact.name
-        $uniqueArtifactName = "${baseArtifactName}-${branchName}-${shortSha}-${timestamp}"
+        Write-Output "Building OptiScaler from branch: $branchName"
+        Write-Output "Commit: $commitSha"
         
-        # Convert artifact IDs to JSON array
-        $artifactIds = $buildArtifacts | ForEach-Object { $_.id }
-        $artifactIdsJson = $artifactIds | ConvertTo-Json -Compress
+        # Build the solution
+        try {
+            & msbuild upstream-optiscaler/OptiScaler.sln /p:Configuration=Release /p:Platform=x64 /m
+            Write-Output "✅ Build completed successfully!"
+            
+            # Check if build outputs exist
+            $dllPath = "upstream-optiscaler\x64\Release\OptiScaler.dll"
+            if (-not (Test-Path $dllPath)) {
+                Write-Error "❌ OptiScaler.dll not found at expected location: $dllPath"
+                exit 1
+            }
+            
+            Write-Output "✅ OptiScaler.dll found at: $dllPath"
+            
+            # Create artifact name
+            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $artifactName = "OptiScaler_${branchName}_${shortSha}_${timestamp}"
+            
+            echo "build_successful=true" >> $env:GITHUB_OUTPUT
+            echo "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
+            echo "base_artifact_name=OptiScaler_${branchName}_${shortSha}" >> $env:GITHUB_OUTPUT
+            echo "dll_path=$dllPath" >> $env:GITHUB_OUTPUT
+            
+        } catch {
+            Write-Error "❌ Build failed: $($_.Exception.Message)"
+            exit 1
+        }
+
+    - name: Prepare OptiScaler artifacts
+      id: prepare_optiscaler
+      shell: powershell
+      run: |
+        $dllPath = "${{ steps.build_optiscaler.outputs.dll_path }}"
+        $artifactName = "${{ steps.build_optiscaler.outputs.artifact_name }}"
         
-        echo "artifact_name=$uniqueArtifactName" >> $env:GITHUB_OUTPUT
-        echo "base_artifact_name=$baseArtifactName" >> $env:GITHUB_OUTPUT
-        echo "artifact_ids=$artifactIdsJson" >> $env:GITHUB_OUTPUT
+        Write-Output "Preparing OptiScaler artifacts..."
         
         # Create the main extraction directory
         $extractPath = "${{ github.workspace }}\x64\Release\a"
         New-Item -ItemType Directory -Force -Path $extractPath
         
-        # Download and extract each artifact
-        foreach ($artifactId in $artifactIds) {
-            $downloadUrl = "https://api.github.com/repos/optiscaler/OptiScaler/actions/artifacts/$artifactId/zip"
-            
-            Write-Output "Downloading artifact ID $artifactId from: $downloadUrl"
-            
-            # Download the artifact
-            $zipPath = "${{ github.workspace }}\optiscaler-artifact-$artifactId.zip"
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -Headers $headers
-            
-            # Extract the artifact to the main directory
-            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-            
-            Write-Output "Successfully downloaded and extracted artifact ID: $artifactId"
+        # Copy the built DLL to the artifact directory
+        Copy-Item -Path $dllPath -Destination "$extractPath\OptiScaler.dll"
+        Write-Output "✅ Copied OptiScaler.dll to artifact directory"
+        
+        # Copy any additional files from the build output if they exist
+        $buildOutputDir = "upstream-optiscaler\x64\Release"
+        $additionalFiles = @("*.pdb", "*.ini", "*.txt", "*.md")
+        
+        foreach ($pattern in $additionalFiles) {
+            $files = Get-ChildItem -Path $buildOutputDir -Filter $pattern -ErrorAction SilentlyContinue
+            foreach ($file in $files) {
+                Copy-Item -Path $file.FullName -Destination $extractPath
+                Write-Output "Copied additional file: $($file.Name)"
+            }
         }
         
-        Write-Output "All OptiScaler artifacts downloaded and extracted"
+        # Create a simple 7z archive with just the DLL for now
+        $archive7zPath = "${{ github.workspace }}\$artifactName.7z"
+        
+        try {
+            & 7z a -t7z -mx=9 $archive7zPath "$extractPath\OptiScaler.dll"
+            Write-Output "✅ Created OptiScaler 7z archive: $artifactName.7z"
+        } catch {
+            Write-Error "❌ Failed to create 7z archive: $($_.Exception.Message)"
+            exit 1
+        }
+        
+        # Copy the 7z file to the artifact directory for bundling
+        Copy-Item -Path $archive7zPath -Destination $extractPath
+        
+        Write-Output "OptiScaler artifacts prepared successfully"
 
     - name: Download latest dlssg-to-fsr3 release
       id: dlssg_download
@@ -706,7 +607,7 @@ jobs:
         $fileDetails = '${{ steps.prepare_assets.outputs.file_details }}' | ConvertFrom-Json
         
         # Get the release tag for URL construction
-        $releaseTag = "${{ steps.download_artifacts.outputs.artifact_name }}"
+        $releaseTag = "${{ steps.build_optiscaler.outputs.artifact_name }}"
         $repoName = "${{ github.repository }}"
         
         # Format as JSON array for release notes with download URLs
@@ -736,8 +637,8 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.download_artifacts.outputs.artifact_name }}
-        release_name: ${{ steps.download_artifacts.outputs.base_artifact_name }} - Latest Branch ({{ steps.find_branch.outputs.branch_name }})
+        tag_name: ${{ steps.build_optiscaler.outputs.artifact_name }}
+        release_name: ${{ steps.build_optiscaler.outputs.base_artifact_name }} - Latest Branch (${{ steps.find_branch.outputs.branch_name }})
         body: |
           **Automated Latest Branch Release**
           
@@ -750,7 +651,7 @@ jobs:
           - **Commit Date**: ${{ steps.find_branch.outputs.commit_date }}
           - **Commit Author**: ${{ steps.find_branch.outputs.commit_author }}
           - **Commit Message**: ${{ steps.find_branch.outputs.commit_message }}
-          - **Workflow Run**: [View Build Details](https://github.com/optiscaler/OptiScaler/actions/runs/${{ steps.trigger_build.outputs.workflow_run_id }})
+          - **Built In**: This workflow (no upstream build triggered)
           
           ## Components Included
           
@@ -778,11 +679,10 @@ jobs:
           **Build Information:**
           - Source Branch: `${{ steps.find_branch.outputs.branch_name }}`
           - Source Commit: `${{ steps.find_branch.outputs.commit_sha }}`
-          - Base Artifact: `${{ steps.download_artifacts.outputs.base_artifact_name }}`
-          - Release Tag: `${{ steps.download_artifacts.outputs.artifact_name }}`
+          - Base Artifact: `${{ steps.build_optiscaler.outputs.base_artifact_name }}`
+          - Release Tag: `${{ steps.build_optiscaler.outputs.artifact_name }}`
           - Trigger: Manual (`${{ github.event_name }}`)
           - Our Workflow Run: [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - Upstream Build Run: [View Details](https://github.com/optiscaler/OptiScaler/actions/runs/${{ steps.trigger_build.outputs.workflow_run_id }})
         draft: false
         prerelease: true
       id: create_release
@@ -845,7 +745,7 @@ jobs:
         $shortSha = "${{ steps.find_branch.outputs.short_sha }}"
         
         $body = @{
-          description = "🌟 Automated latest-branch releases for OptiScaler | Latest: ${{ steps.download_artifacts.outputs.base_artifact_name }} from $branchName@$shortSha"
+          description = "🌟 Automated latest-branch releases for OptiScaler | Latest: ${{ steps.build_optiscaler.outputs.base_artifact_name }} from $branchName@$shortSha"
         } | ConvertTo-Json
         
         try {
