@@ -1,0 +1,279 @@
+name: Build Upstream OptiScaler
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Build mode (master or latest-any)
+        required: true
+        type: string
+      publish_release:
+        description: Publish a GitHub prerelease after a successful build
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Resolve upstream target
+        id: resolve
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: |
+          $repo = 'optiscaler/OptiScaler'
+          $headers = @{
+            'Accept' = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+
+          if ($env:GH_TOKEN) {
+            $headers['Authorization'] = "Bearer $env:GH_TOKEN"
+          }
+
+          function Get-Json([string]$url) {
+            Invoke-RestMethod -Headers $headers -Uri $url
+          }
+
+          function Get-BranchHead([string]$branchName) {
+            $encodedBranch = [System.Uri]::EscapeDataString($branchName)
+            Get-Json "https://api.github.com/repos/$repo/branches/$encodedBranch"
+          }
+
+          function Get-Commit([string]$sha) {
+            Get-Json "https://api.github.com/repos/$repo/commits/$sha"
+          }
+
+          function Slugify([string]$value) {
+            $slug = $value.ToLowerInvariant() -replace '[^a-z0-9._-]+', '-'
+            $slug = $slug.Trim('-')
+            if ([string]::IsNullOrWhiteSpace($slug)) {
+              throw "Could not slugify value: $value"
+            }
+            return $slug
+          }
+
+          $mode = $env:MODE
+          $publishRelease = $env:PUBLISH_RELEASE -eq 'true'
+
+          if ($mode -eq 'master') {
+            $branchName = 'master'
+            $branch = Get-BranchHead $branchName
+            $sha = $branch.commit.sha
+            $commit = Get-Commit $sha
+            $commitDate = $commit.commit.committer.date
+          }
+          elseif ($mode -eq 'latest-any') {
+            $branches = Get-Json "https://api.github.com/repos/$repo/branches?per_page=100"
+            if (-not $branches) {
+              throw 'No upstream branches found.'
+            }
+
+            $candidates = foreach ($branch in $branches) {
+              $sha = $branch.commit.sha
+              $commit = Get-Commit $sha
+              [PSCustomObject]@{
+                BranchName = $branch.name
+                Sha = $sha
+                CommitDate = [DateTimeOffset]::Parse($commit.commit.committer.date)
+              }
+            }
+
+            $latest = $candidates | Sort-Object CommitDate -Descending | Select-Object -First 1
+            $branchName = $latest.BranchName
+            $sha = $latest.Sha
+            $commitDate = $latest.CommitDate.ToString('o')
+          }
+          else {
+            throw "Unsupported mode: $mode"
+          }
+
+          $branchSlug = Slugify $branchName
+          $shortSha = $sha.Substring(0, 8)
+          $commitUrl = "https://github.com/$repo/commit/$sha"
+
+          switch ($mode) {
+            'master' {
+              $tagName = "master-$shortSha"
+              $releaseName = "master @ $shortSha"
+              $assetName = "OptiScaler_master_${shortSha}.7z"
+            }
+            'latest-any' {
+              $tagName = "any-$branchSlug-$shortSha"
+              $releaseName = "latest-any: $branchName @ $shortSha"
+              $assetName = "OptiScaler_any_${branchSlug}_${shortSha}.7z"
+            }
+          }
+
+          $releaseBody = $commitUrl
+          $metadataName = "$tagName.json"
+
+          "upstream_repo=$repo" >> $env:GITHUB_OUTPUT
+          "mode=$mode" >> $env:GITHUB_OUTPUT
+          "branch_name=$branchName" >> $env:GITHUB_OUTPUT
+          "branch_slug=$branchSlug" >> $env:GITHUB_OUTPUT
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          "commit_date=$commitDate" >> $env:GITHUB_OUTPUT
+          "commit_url=$commitUrl" >> $env:GITHUB_OUTPUT
+          "tag_name=$tagName" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "asset_name=$assetName" >> $env:GITHUB_OUTPUT
+          "metadata_name=$metadataName" >> $env:GITHUB_OUTPUT
+          "release_body=$releaseBody" >> $env:GITHUB_OUTPUT
+          "publish_release=$($publishRelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Check for existing release
+        id: release_check
+        if: steps.resolve.outputs.publish_release == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.resolve.outputs.tag_name }}
+        run: |
+          $headers = @{
+            'Accept' = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+
+          if ($env:GH_TOKEN) {
+            $headers['Authorization'] = "Bearer $env:GH_TOKEN"
+          }
+
+          $url = "https://api.github.com/repos/${{ github.repository }}/releases/tags/$env:TAG_NAME"
+          $exists = $false
+
+          try {
+            Invoke-WebRequest -Headers $headers -Uri $url | Out-Null
+            $exists = $true
+          }
+          catch {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            if ($statusCode -ne 404) {
+              throw
+            }
+          }
+
+          $existsString = $exists.ToString().ToLowerInvariant()
+          "release_exists=$existsString" >> $env:GITHUB_OUTPUT
+
+      - name: Skip because release already exists
+        if: steps.resolve.outputs.publish_release == 'true' && steps.release_check.outputs.release_exists == 'true'
+        shell: pwsh
+        run: |
+          Write-Host "Release tag ${{ steps.resolve.outputs.tag_name }} already exists. Skipping build."
+
+      - name: Checkout upstream source
+        if: steps.resolve.outputs.publish_release != 'true' || steps.release_check.outputs.release_exists != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: optiscaler/OptiScaler
+          ref: ${{ steps.resolve.outputs.sha }}
+          submodules: recursive
+          fetch-depth: 1
+          path: upstream
+
+      - name: Add MSBuild to PATH
+        if: steps.resolve.outputs.publish_release != 'true' || steps.release_check.outputs.release_exists != 'true'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build upstream
+        if: steps.resolve.outputs.publish_release != 'true' || steps.release_check.outputs.release_exists != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\upstream
+        run: |
+          msbuild /m /p:Configuration=Release . /verbosity:minimal
+
+      - name: Package build output
+        id: package
+        if: steps.resolve.outputs.publish_release != 'true' || steps.release_check.outputs.release_exists != 'true'
+        shell: pwsh
+        env:
+          ASSET_NAME: ${{ steps.resolve.outputs.asset_name }}
+        run: |
+          $artifactDir = "${{ github.workspace }}\upstream\x64\Release\a"
+          if (-not (Test-Path $artifactDir)) {
+            throw "Expected build output directory not found: $artifactDir"
+          }
+
+          $packagePath = "${{ runner.temp }}\$env:ASSET_NAME"
+          if (Test-Path $packagePath) {
+            Remove-Item -Force $packagePath
+          }
+
+          & 7z a -r $packagePath "$artifactDir\*.*"
+          if ($LASTEXITCODE -ne 0) {
+            throw "7z packaging failed with exit code $LASTEXITCODE"
+          }
+
+          "package_path=$packagePath" >> $env:GITHUB_OUTPUT
+
+      - name: Write metadata
+        id: metadata
+        if: steps.resolve.outputs.publish_release != 'true' || steps.release_check.outputs.release_exists != 'true'
+        shell: pwsh
+        env:
+          METADATA_NAME: ${{ steps.resolve.outputs.metadata_name }}
+          UPSTREAM_REPO: ${{ steps.resolve.outputs.upstream_repo }}
+          MODE: ${{ steps.resolve.outputs.mode }}
+          BRANCH_NAME: ${{ steps.resolve.outputs.branch_name }}
+          BRANCH_SLUG: ${{ steps.resolve.outputs.branch_slug }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          SHORT_SHA: ${{ steps.resolve.outputs.short_sha }}
+          COMMIT_DATE: ${{ steps.resolve.outputs.commit_date }}
+          COMMIT_URL: ${{ steps.resolve.outputs.commit_url }}
+          TAG_NAME: ${{ steps.resolve.outputs.tag_name }}
+          RELEASE_NAME: ${{ steps.resolve.outputs.release_name }}
+          ASSET_NAME: ${{ steps.resolve.outputs.asset_name }}
+          PUBLISH_RELEASE: ${{ steps.resolve.outputs.publish_release }}
+        run: |
+          $metadata = [ordered]@{
+            upstream_repo = $env:UPSTREAM_REPO
+            mode = $env:MODE
+            branch = $env:BRANCH_NAME
+            branch_slug = $env:BRANCH_SLUG
+            sha = $env:SHA
+            short_sha = $env:SHORT_SHA
+            commit_date = $env:COMMIT_DATE
+            commit_url = $env:COMMIT_URL
+            tag_name = $env:TAG_NAME
+            release_name = $env:RELEASE_NAME
+            asset_name = $env:ASSET_NAME
+            publish_release = ($env:PUBLISH_RELEASE -eq 'true')
+            built_at = (Get-Date).ToUniversalTime().ToString('o')
+          }
+
+          $metadataPath = "${{ runner.temp }}\$env:METADATA_NAME"
+          $metadata | ConvertTo-Json -Depth 4 | Out-File -FilePath $metadataPath -Encoding utf8
+
+          "metadata_path=$metadataPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifacts
+        if: steps.resolve.outputs.publish_release != 'true' || steps.release_check.outputs.release_exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.resolve.outputs.tag_name }}
+          retention-days: 14
+          path: |
+            ${{ steps.package.outputs.package_path }}
+            ${{ steps.metadata.outputs.metadata_path }}
+
+      - name: Create prerelease
+        if: steps.resolve.outputs.publish_release == 'true' && steps.release_check.outputs.release_exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.tag_name }}
+          name: ${{ steps.resolve.outputs.release_name }}
+          body: ${{ steps.resolve.outputs.release_body }}
+          prerelease: true
+          files: |
+            ${{ steps.package.outputs.package_path }}
+            ${{ steps.metadata.outputs.metadata_path }}
