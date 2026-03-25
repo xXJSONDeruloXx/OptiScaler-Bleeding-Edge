@@ -1,0 +1,27 @@
+name: Upstream Master Build
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a prerelease after a successful build
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-master-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-upstream.yml
+    with:
+      mode: master
+      publish_release: ${{ github.event_name == 'schedule' || inputs.publish_release }}
+    secrets: inherit
